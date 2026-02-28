@@ -198,12 +198,17 @@ if show_arch_grids and x_map and y_map:
 x_coords = [n['x'] for n in nodes]
 y_coords = [n['y'] for n in nodes]
 z_coords = [n['z'] for n in nodes]
-fig.add_trace(go.Scatter3d(x=x_coords, y=y_coords, z=z_coords, mode='markers', marker=dict(size=4, color='black'), hoverinfo='text', text=[f"Node: {n['id']}" for n in nodes], showlegend=False))
+fig.add_trace(go.Scatter3d(
+    x=x_coords, y=y_coords, z=z_coords, mode='markers', 
+    marker=dict(size=4, color='black'), hoverinfo='text', 
+    text=[f"Node: {n['id']}" for n in nodes], showlegend=False
+))
 
+# Configure Axis Mesh Visibility safely
 if show_axis:
-    axis_config = dict(showbackground=True, showgrid=True, zeroline=True, title='(m)')
+    axis_config = dict(showbackground=True, showgrid=True, zeroline=True)
 else:
-    axis_config = dict(showbackground=False, showgrid=False, zeroline=False, showticklabels=False, title='')
+    axis_config = dict(showbackground=False, showgrid=False, zeroline=False, showticklabels=False)
 
 fig.update_layout(
     scene=dict(
