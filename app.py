@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
+import math
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="3D Building Frame Designer", layout="wide")
@@ -21,7 +22,6 @@ with col2:
     L_y = st.number_input("Y Bay Wdt (m)", value=5.0)
 
 st.sidebar.header("2. Section Properties")
-# Placeholder for applying IS code sections to columns and beams
 col_dim = st.sidebar.text_input("Column Size (mm)", "300x450")
 beam_dim = st.sidebar.text_input("Beam Size (mm)", "230x400")
 
@@ -142,25 +142,23 @@ with colC:
         st.info("Optimization and penalty evaluation to be connected.")
 
 
-# It calculates the equivalent UDLs for every beam in your generated grid and assigns the loads directly to the element data. #
+# --- SLAB LOAD DISTRIBUTION & MATRIX GENERATION ---
 st.divider()
-st.header("3. Slab Load Distribution (Yield Line Theory)")
-st.caption("Distributes floor area loads onto the 3D frame beams as equivalent UDLs.")
+st.header("3. Slab Load Distribution & Matrix Assembly")
+st.caption("Distributes floor loads, calculates 3D transformations, and builds element stiffness matrices.")
 
 colA, colB, colC = st.columns(3)
 with colA:
     slab_thickness = st.number_input("Slab Thickness (mm)", value=150)
-    # Dead load: thickness * density of concrete (25 kN/m^3) + 1.5 kN/m^2 floor finish
     dl_area = (slab_thickness / 1000.0) * 25.0 + 1.5 
-    st.info(f"**Calculated Dead Load (DL):** {dl_area:.2f} $kN/m^2$")
+    st.info(f"**Calculated Dead Load (DL):** {dl_area:.2f} kN/m²")
 with colB:
-    ll_area = st.number_input("Live Load (LL) ($kN/m^2$)", value=3.0, step=0.5)
+    ll_area = st.number_input("Live Load (LL) (kN/m²)", value=3.0, step=0.5)
 with colC:
-    # Limit state factored load: 1.5(DL + LL)
     q_factored = 1.5 * (dl_area + ll_area)
-    st.success(f"**Factored Area Load ($q_u$):** {q_factored:.2f} $kN/m^2$")
+    st.success(f"**Factored Area Load (q_u):** {q_factored:.2f} kN/m²")
 
-if st.button("Distribute Loads to Beams", type="primary"):
+if st.button("Distribute Loads & Assemble Matrices", type="primary"):
     # 1. Determine panel dimensions
     Lx = min(L_x, L_y)
     Ly = max(L_x, L_y)
@@ -168,17 +166,14 @@ if st.button("Distribute Loads to Beams", type="primary"):
     
     # 2. Calculate Equivalent UDLs
     if aspect_ratio > 2.0:
-        # One-way slab logic
         w_long = q_factored * (Lx / 2.0)
         w_short = 0.0
         slab_type = "One-Way Slab"
     else:
-        # Two-way slab logic
         w_short = (q_factored * Lx) / 3.0
         w_long = (q_factored * Lx / 6.0) * (3.0 - (Lx / Ly)**2)
         slab_type = "Two-Way Slab"
         
-    # Map calculated loads based on which axis is longer
     if L_x == Lx:
         w_x_beam = w_short
         w_y_beam = w_long
@@ -194,11 +189,7 @@ if st.button("Distribute Loads to Beams", type="primary"):
             ni = next(n for n in nodes if n['id'] == el['ni'])
             nj = next(n for n in nodes if n['id'] == el['nj'])
             
-            # Identify if beam is parallel to X or Y axis
             if abs(ni['y'] - nj['y']) < 0.01: # Parallel to X-axis
-                # Internal beams take load from two adjacent slabs, perimeter beams take from one.
-                # For simplicity in this base script, we assume a typical internal beam multiplier of 2.
-                # A full script checks neighbor existence.
                 is_perimeter_y = ni['y'] == 0 or ni['y'] == bay_y * L_y
                 multiplier = 1.0 if is_perimeter_y else 2.0
                 el['load_kN_m'] = w_x_beam * multiplier
@@ -219,12 +210,12 @@ if st.button("Distribute Loads to Beams", type="primary"):
     with col2:
         st.metric("Internal Y-Beam Load", f"{w_y_beam * 2:.2f} kN/m")
         st.caption("Perimeter: " + f"{w_y_beam:.2f} kN/m")
-    # =========================================================================
-    # 4. Construct Global Force Vector (F_global) using Equivalent Nodal Loads
-    # =========================================================================
-    import math
 
-    # --- NEW HELPER FUNCTION FOR 3D TRANSFORMATION ---
+    # =========================================================================
+    # 4. Construct Global Matrices and Force Vectors
+    # =========================================================================
+    
+    # --- HELPER FUNCTION: 3D TRANSFORMATION ---
     def get_transformation_matrix(ni, nj):
         dx = nj['x'] - ni['x']
         dy = nj['y'] - ni['y']
@@ -235,16 +226,14 @@ if st.button("Distribute Loads to Beams", type="primary"):
         cy = dy / L
         cz = dz / L
         
-        # 3x3 Direction Cosine Matrix (Lambda)
         lam = np.zeros((3, 3))
         
-        # Special case for perfectly vertical columns to avoid division by zero
         if abs(cx) < 1e-6 and abs(cy) < 1e-6:
-            if cz > 0: # Pointing UP
+            if cz > 0: 
                 lam = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]])
-            else:      # Pointing DOWN
+            else:      
                 lam = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])
-        else: # Standard non-vertical members
+        else: 
             D = math.sqrt(cx**2 + cy**2)
             lam = np.array([
                 [cx, cy, cz],
@@ -252,28 +241,21 @@ if st.button("Distribute Loads to Beams", type="primary"):
                 [-cy/D, cx/D, 0]
             ])
             
-        # Build 12x12 Transformation Matrix (T)
         T = np.zeros((12, 12))
         T[0:3, 0:3] = lam
         T[3:6, 3:6] = lam
         T[6:9, 6:9] = lam
         T[9:12, 9:12] = lam
-        
         return T
-    # -------------------------------------------------
-    # --- NEW HELPER FUNCTION FOR LOCAL STIFFNESS MATRIX ---
+
+    # --- HELPER FUNCTION: LOCAL STIFFNESS MATRIX ---
     def get_local_stiffness_matrix(E, G, A, Iy, Iz, J, L):
         k = np.zeros((12, 12))
-        
-        # 1. Axial terms (local X)
         k[0, 0] = k[6, 6] = E * A / L
         k[0, 6] = k[6, 0] = -E * A / L
-        
-        # 2. Torsion terms (local X rotation)
         k[3, 3] = k[9, 9] = G * J / L
         k[3, 9] = k[9, 3] = -G * J / L
         
-        # 3. Bending about local Y (causes shear in local Z)
         k[2, 2] = k[8, 8] = 12 * E * Iy / L**3
         k[2, 8] = k[8, 2] = -12 * E * Iy / L**3
         k[4, 4] = k[10, 10] = 4 * E * Iy / L
@@ -281,61 +263,51 @@ if st.button("Distribute Loads to Beams", type="primary"):
         k[2, 4] = k[2, 10] = k[4, 2] = k[10, 2] = -6 * E * Iy / L**2
         k[8, 4] = k[8, 10] = k[4, 8] = k[10, 8] = 6 * E * Iy / L**2
         
-        # 4. Bending about local Z (causes shear in local Y)
         k[1, 1] = k[7, 7] = 12 * E * Iz / L**3
         k[1, 7] = k[7, 1] = -12 * E * Iz / L**3
         k[5, 5] = k[11, 11] = 4 * E * Iz / L
         k[5, 11] = k[11, 5] = 2 * E * Iz / L
         k[1, 5] = k[1, 11] = k[5, 1] = k[11, 1] = 6 * E * Iz / L**2
         k[7, 5] = k[7, 11] = k[5, 7] = k[11, 7] = -6 * E * Iz / L**2
-        
         return k
-    # ------------------------------------------------------
+
     # 1. Initialize Global Force Vector (6 DOFs per node)
     num_nodes = len(nodes)
     F_global = np.zeros(num_nodes * 6)
 
-    # 2. Iterate through elements to apply Equivalent Nodal Loads
+    # 2. Iterate through elements to apply Stiffness and Nodal Loads
     for el in elements:
-        # ... (Inside your existing: for el in elements:) ...
         
-        # [PLACEHOLDER SECTION PROPERTIES]
-        # Assuming M25 Concrete: E = 25000 MPa (kN/mm2 -> converted to kN/m2)
+        # A. GEOMETRY & TRANSFORMATION
+        ni_data = next(n for n in nodes if n['id'] == el['ni'])
+        nj_data = next(n for n in nodes if n['id'] == el['nj'])
+        
+        dx = nj_data['x'] - ni_data['x']
+        dy = nj_data['y'] - ni_data['y']
+        dz = nj_data['z'] - ni_data['z']
+        L = math.sqrt(dx**2 + dy**2 + dz**2)
+        
+        T_matrix = get_transformation_matrix(ni_data, nj_data)
+
+        # B. STIFFNESS MATRIX
         E_conc = 25e6  # kN/m^2
-        G_conc = E_conc / (2 * (1 + 0.2)) # Assuming Poisson's ratio = 0.2
+        G_conc = E_conc / (2 * (1 + 0.2)) 
         
-        # Generic 300x450 section for everything right now (0.3m x 0.45m)
+        # Generic 300x450 section for now
         b, h = 0.3, 0.45
         A_sec = b * h
         Iy_sec = (b * h**3) / 12.0
         Iz_sec = (h * b**3) / 12.0
-        # Torsional constant (approximate for rectangle)
         J_sec = (b**3 * h) * (1/3 - 0.21*(b/h)*(1 - (b**4)/(12*h**4)))
         
-        # 1. Get 12x12 Local Stiffness Matrix
         k_local = get_local_stiffness_matrix(E_conc, G_conc, A_sec, Iy_sec, Iz_sec, J_sec, L)
-        
-        # 2. Transform to Global Element Stiffness Matrix
-        # k_global = T^T * k_local * T
         k_global = np.dot(np.dot(T_matrix.T, k_local), T_matrix)
-        
-        # Store it in the element dictionary for the global assembly step
         el['k_global'] = k_global
-        
+
+        # C. LOAD ASSEMBLY (ONLY LOADED BEAMS)
         w = el.get('load_kN_m', 0.0)
         if el['type'] == 'Beam' and w > 0:
             
-            # Get node coordinates
-            ni_data = next(n for n in nodes if n['id'] == el['ni'])
-            nj_data = next(n for n in nodes if n['id'] == el['nj'])
-            
-            # Calculate element length (L)
-            dx = nj_data['x'] - ni_data['x']
-            dy = nj_data['y'] - ni_data['y']
-            dz = nj_data['z'] - ni_data['z']
-            L = math.sqrt(dx**2 + dy**2 + dz**2)
-            
-            # Calculate Local Equivalent Nodal Loads (ENL = -FEM)
             V = (w * L) / 2.0
             M = (w * L**2) / 12.0
             
@@ -345,20 +317,12 @@ if st.button("Distribute Loads to Beams", type="primary"):
             F_local_ENL[8] = -V        # Downward shear force Z (Node j)
             F_local_ENL[10] = M        # Bending moment Y (Node j)
             
-            # --- NEW TRANSFORMATION APPLICATION ---
-            # Get the transformation matrix for this specific beam
-            T_matrix = get_transformation_matrix(ni_data, nj_data)
-            
-            # Transform Local forces to Global forces (P_global = T^T * F_local)
             P_global = np.dot(T_matrix.T, F_local_ENL)
-            # --------------------------------------
             
-            # Assemble into Global Force Vector
             dof_i = el['ni'] * 6
             dof_j = el['nj'] * 6
             
             F_global[dof_i : dof_i + 6] += P_global[0:6]
             F_global[dof_j : dof_j + 6] += P_global[6:12]
 
-    st.success(f"Successfully assembled Equivalent Nodal Loads into a {len(F_global)}x1 Global Force Vector.")
-
+    st.success(f"Successfully assigned stiffness matrices and assembled a {len(F_global)}x1 Global Force Vector.")
