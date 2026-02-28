@@ -283,3 +283,79 @@ if st.button("Run Complete 3D Structural Analysis", type="primary", use_containe
                 
         except np.linalg.LinAlgError:
             st.error("Solver Failed: Global Stiffness Matrix is singular. Check geometry/boundary conditions.")
+
+        # =========================================================================
+    # 7. IS 456:2000 Concrete Design Checks (Beams)
+    # =========================================================================
+    st.divider()
+    st.header("4. IS 456:2000 Beam Design (Flexure)")
+    
+    # Material Properties
+    col_mat1, col_mat2 = st.columns(2)
+    with col_mat1:
+        fck = st.number_input("Concrete Grade (fck in MPa)", value=25.0, step=5.0)
+    with col_mat2:
+        fy = st.number_input("Steel Grade (fy in MPa)", value=500.0, step=85.0)
+
+    if st.button("Calculate Beam Reinforcement", type="primary"):
+        beam_results = []
+        
+        # Beam Dimensions (Converting from mm to meters for moment capacity)
+        # Using the default 230x400 mm section from your sidebar
+        b_m = 0.230
+        h_m = 0.400
+        clear_cover = 0.030 # 30mm cover
+        d_m = h_m - clear_cover
+        
+        # IS 456 Constant for Fe500 Limiting Moment
+        # Mulim = 0.133 * fck * b * d^2
+        Mu_lim_kNm = 0.133 * fck * b_m * (d_m**2) * 1000 
+        
+        for el in elements:
+            if el['type'] == 'Beam':
+                # Extract absolute maximum moment (converting from N-m to kN-m if needed, 
+                # but our matrix was already in kN and m)
+                M_y_i = abs(el['F_internal'][4])
+                M_y_j = abs(el['F_internal'][10])
+                Mu_max = max(M_y_i, M_y_j)
+                
+                status = ""
+                Ast_req = 0.0
+                
+                # Minimum reinforcement criteria (IS 456 clause 26.5.1.1)
+                Ast_min = (0.85 * b_m * d_m * 1e6) / fy
+                
+                if Mu_max == 0:
+                    status = "No Load"
+                    Ast_req = Ast_min
+                elif Mu_max <= Mu_lim_kNm:
+                    status = "Singly Reinforced"
+                    # Solve IS 456 quadratic formula for Ast
+                    # Mu = 0.87 * fy * Ast * d * (1 - (Ast * fy)/(b * d * fck))
+                    # Rearranges to: a*(Ast^2) - b*(Ast) + c = 0
+                    a = (0.87 * fy * fy) / (b_m * d_m * fck)
+                    b_coef = 0.87 * fy * d_m
+                    c = -Mu_max / 1000.0 # Convert Mu to MN-m for MPa consistency
+                    
+                    # Quadratic formula
+                    discriminant = b_coef**2 - 4*a*c
+                    if discriminant >= 0:
+                        Ast_m2 = (b_coef - math.sqrt(discriminant)) / (2*a)
+                        Ast_req = Ast_m2 * 1e6 # Convert to mm^2
+                        Ast_req = max(Ast_req, Ast_min)
+                    else:
+                        status = "Math Error"
+                else:
+                    status = "Doubly Reinforced (or Resize)"
+                    Ast_req = None # Requires top and bottom steel calculation
+                    
+                beam_results.append({
+                    "Beam ID": el['id'],
+                    "Max Moment (kN-m)": round(Mu_max, 2),
+                    "Section Status": status,
+                    "Req. Bottom Steel (mm²)": round(Ast_req, 2) if Ast_req else "N/A"
+                })
+
+        # Display results in a clean table
+        st.dataframe(beam_results, use_container_width=True)
+        st.info(f"**Note:** Limiting Moment Capacity ($M_{{u,lim}}$) for this section is **{Mu_lim_kNm:.2f} kN-m**.")
