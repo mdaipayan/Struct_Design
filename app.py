@@ -261,13 +261,67 @@ if st.button("Distribute Loads to Beams", type="primary"):
         
         return T
     # -------------------------------------------------
-
+    # --- NEW HELPER FUNCTION FOR LOCAL STIFFNESS MATRIX ---
+    def get_local_stiffness_matrix(E, G, A, Iy, Iz, J, L):
+        k = np.zeros((12, 12))
+        
+        # 1. Axial terms (local X)
+        k[0, 0] = k[6, 6] = E * A / L
+        k[0, 6] = k[6, 0] = -E * A / L
+        
+        # 2. Torsion terms (local X rotation)
+        k[3, 3] = k[9, 9] = G * J / L
+        k[3, 9] = k[9, 3] = -G * J / L
+        
+        # 3. Bending about local Y (causes shear in local Z)
+        k[2, 2] = k[8, 8] = 12 * E * Iy / L**3
+        k[2, 8] = k[8, 2] = -12 * E * Iy / L**3
+        k[4, 4] = k[10, 10] = 4 * E * Iy / L
+        k[4, 10] = k[10, 4] = 2 * E * Iy / L
+        k[2, 4] = k[2, 10] = k[4, 2] = k[10, 2] = -6 * E * Iy / L**2
+        k[8, 4] = k[8, 10] = k[4, 8] = k[10, 8] = 6 * E * Iy / L**2
+        
+        # 4. Bending about local Z (causes shear in local Y)
+        k[1, 1] = k[7, 7] = 12 * E * Iz / L**3
+        k[1, 7] = k[7, 1] = -12 * E * Iz / L**3
+        k[5, 5] = k[11, 11] = 4 * E * Iz / L
+        k[5, 11] = k[11, 5] = 2 * E * Iz / L
+        k[1, 5] = k[1, 11] = k[5, 1] = k[11, 1] = 6 * E * Iz / L**2
+        k[7, 5] = k[7, 11] = k[5, 7] = k[11, 7] = -6 * E * Iz / L**2
+        
+        return k
+    # ------------------------------------------------------
     # 1. Initialize Global Force Vector (6 DOFs per node)
     num_nodes = len(nodes)
     F_global = np.zeros(num_nodes * 6)
 
     # 2. Iterate through elements to apply Equivalent Nodal Loads
     for el in elements:
+        # ... (Inside your existing: for el in elements:) ...
+        
+        # [PLACEHOLDER SECTION PROPERTIES]
+        # Assuming M25 Concrete: E = 25000 MPa (kN/mm2 -> converted to kN/m2)
+        E_conc = 25e6  # kN/m^2
+        G_conc = E_conc / (2 * (1 + 0.2)) # Assuming Poisson's ratio = 0.2
+        
+        # Generic 300x450 section for everything right now (0.3m x 0.45m)
+        b, h = 0.3, 0.45
+        A_sec = b * h
+        Iy_sec = (b * h**3) / 12.0
+        Iz_sec = (h * b**3) / 12.0
+        # Torsional constant (approximate for rectangle)
+        J_sec = (b**3 * h) * (1/3 - 0.21*(b/h)*(1 - (b**4)/(12*h**4)))
+        
+        # 1. Get 12x12 Local Stiffness Matrix
+        k_local = get_local_stiffness_matrix(E_conc, G_conc, A_sec, Iy_sec, Iz_sec, J_sec, L)
+        
+        # 2. Transform to Global Element Stiffness Matrix
+        # k_global = T^T * k_local * T
+        k_global = np.dot(np.dot(T_matrix.T, k_local), T_matrix)
+        
+        # Store it in the element dictionary for the global assembly step
+        el['k_global'] = k_global
+        
         w = el.get('load_kN_m', 0.0)
         if el['type'] == 'Beam' and w > 0:
             
