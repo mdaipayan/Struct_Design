@@ -220,10 +220,47 @@ if st.button("Distribute Loads to Beams", type="primary"):
         st.metric("Internal Y-Beam Load", f"{w_y_beam * 2:.2f} kN/m")
         st.caption("Perimeter: " + f"{w_y_beam:.2f} kN/m")
     # =========================================================================
-    # PASTE THE NEW CODE HERE:
     # 4. Construct Global Force Vector (F_global) using Equivalent Nodal Loads
     # =========================================================================
     import math
+
+    # --- NEW HELPER FUNCTION FOR 3D TRANSFORMATION ---
+    def get_transformation_matrix(ni, nj):
+        dx = nj['x'] - ni['x']
+        dy = nj['y'] - ni['y']
+        dz = nj['z'] - ni['z']
+        L = math.sqrt(dx**2 + dy**2 + dz**2)
+        
+        cx = dx / L
+        cy = dy / L
+        cz = dz / L
+        
+        # 3x3 Direction Cosine Matrix (Lambda)
+        lam = np.zeros((3, 3))
+        
+        # Special case for perfectly vertical columns to avoid division by zero
+        if abs(cx) < 1e-6 and abs(cy) < 1e-6:
+            if cz > 0: # Pointing UP
+                lam = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]])
+            else:      # Pointing DOWN
+                lam = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])
+        else: # Standard non-vertical members
+            D = math.sqrt(cx**2 + cy**2)
+            lam = np.array([
+                [cx, cy, cz],
+                [-cx*cz/D, -cy*cz/D, D],
+                [-cy/D, cx/D, 0]
+            ])
+            
+        # Build 12x12 Transformation Matrix (T)
+        T = np.zeros((12, 12))
+        T[0:3, 0:3] = lam
+        T[3:6, 3:6] = lam
+        T[6:9, 6:9] = lam
+        T[9:12, 9:12] = lam
+        
+        return T
+    # -------------------------------------------------
 
     # 1. Initialize Global Force Vector (6 DOFs per node)
     num_nodes = len(nodes)
@@ -248,15 +285,19 @@ if st.button("Distribute Loads to Beams", type="primary"):
             V = (w * L) / 2.0
             M = (w * L**2) / 12.0
             
-            # Initialize 12x1 local force vector for the element
             F_local_ENL = np.zeros(12)
             F_local_ENL[2] = -V        # Downward shear force Z (Node i)
             F_local_ENL[4] = -M        # Bending moment Y (Node i)
             F_local_ENL[8] = -V        # Downward shear force Z (Node j)
             F_local_ENL[10] = M        # Bending moment Y (Node j)
             
-            # Placeholder for transformation: P_global = T^T * F_local_ENL
-            P_global = F_local_ENL 
+            # --- NEW TRANSFORMATION APPLICATION ---
+            # Get the transformation matrix for this specific beam
+            T_matrix = get_transformation_matrix(ni_data, nj_data)
+            
+            # Transform Local forces to Global forces (P_global = T^T * F_local)
+            P_global = np.dot(T_matrix.T, F_local_ENL)
+            # --------------------------------------
             
             # Assemble into Global Force Vector
             dof_i = el['ni'] * 6
