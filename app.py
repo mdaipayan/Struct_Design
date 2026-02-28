@@ -155,8 +155,13 @@ for z in range(1, num_stories + 1):
             elements.append({'id': element_id, 'ni': group[i]['id'], 'nj': group[i+1]['id'], 'type': 'Beam', 'floor': z, 'size': beam_dim, 'angle': 0})
             element_id += 1
 
-# --- 3D VISUALIZATION ---
+# --- 3D VISUALIZATION WITH GRIDS ---
 st.subheader("Structural Model Viewport")
+
+col_view1, col_view2 = st.columns(2)
+show_arch_grids = col_view1.checkbox("Show Architectural Grids (Base)", value=True)
+show_axis = col_view2.checkbox("Show 3D Axis Mesh & Background", value=True)
+
 fig = go.Figure()
 
 for el in elements:
@@ -168,13 +173,48 @@ for el in elements:
         mode='lines', line=dict(color=color, width=4), hoverinfo='text', text=f"{el['type']} ID: {el['id']}", showlegend=False
     ))
 
-# Plot node grids
+# Plot Architectural Grids at Z=0
+if show_arch_grids and x_map and y_map:
+    min_x, max_x = min(x_map.values()), max(x_map.values())
+    min_y, max_y = min(y_map.values()), max(y_map.values())
+    grid_extension = 1.5 
+    
+    for grid_id, y_val in y_map.items():
+        fig.add_trace(go.Scatter3d(
+            x=[min_x - grid_extension, max_x + grid_extension], y=[y_val, y_val], z=[0, 0],
+            mode='lines+text', line=dict(color='gray', width=2, dash='dash'),
+            text=[f"Grid {grid_id}", ''], textposition='middle left',
+            hoverinfo='none', showlegend=False
+        ))
+        
+    for grid_id, x_val in x_map.items():
+        fig.add_trace(go.Scatter3d(
+            x=[x_val, x_val], y=[min_y - grid_extension, max_y + grid_extension], z=[0, 0],
+            mode='lines+text', line=dict(color='gray', width=2, dash='dash'),
+            text=[f"Grid {grid_id}", ''], textposition='bottom center',
+            hoverinfo='none', showlegend=False
+        ))
+
 x_coords = [n['x'] for n in nodes]
 y_coords = [n['y'] for n in nodes]
 z_coords = [n['z'] for n in nodes]
 fig.add_trace(go.Scatter3d(x=x_coords, y=y_coords, z=z_coords, mode='markers', marker=dict(size=4, color='black'), hoverinfo='text', text=[f"Node: {n['id']}" for n in nodes], showlegend=False))
 
-fig.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'), margin=dict(l=0, r=0, b=0, t=0), height=500)
+if show_axis:
+    axis_config = dict(showbackground=True, showgrid=True, zeroline=True, title='(m)')
+else:
+    axis_config = dict(showbackground=False, showgrid=False, zeroline=False, showticklabels=False, title='')
+
+fig.update_layout(
+    scene=dict(
+        xaxis=dict(**axis_config, title='X (m)' if show_axis else ''),
+        yaxis=dict(**axis_config, title='Y (m)' if show_axis else ''),
+        zaxis=dict(**axis_config, title='Z (m)' if show_axis else ''),
+        aspectmode='data'
+    ), 
+    margin=dict(l=0, r=0, b=0, t=0), 
+    height=600
+)
 st.plotly_chart(fig, use_container_width=True)
 
 # --- ANALYSIS ENGINE ---
