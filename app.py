@@ -58,19 +58,29 @@ nodes = []
 elements = []
 node_id = 0
 
+# Helper function to safely convert empty/null table cells to floats
+def safe_float(val, default=0.0):
+    try:
+        if pd.isna(val) or val is None or str(val).strip() == "":
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
 # 1. Generate Nodes 
 for floor_idx in range(num_stories + 1):
     z_val = z_elevations.get(floor_idx, 0.0)
     for idx, row in col_data.iterrows():
         nodes.append({
             'id': node_id, 
-            'x': float(row['X (m)']), 
-            'y': float(row['Y (m)']), 
+            'x': safe_float(row.get('X (m)')), 
+            'y': safe_float(row.get('Y (m)')), 
             'z': z_val, 
             'floor': floor_idx,
-            'angle': float(row.get('Angle (deg)', 0))
+            'angle': safe_float(row.get('Angle (deg)'))
         })
         node_id += 1
+
 
 # 2. Generate Columns
 element_id = 0
