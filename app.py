@@ -357,5 +357,5 @@ if st.button("Run Custom Layout Analysis & Design", type="primary", use_containe
         tab1, tab2 = st.tabs(["Columns", "Beams"])
         with tab1:
             st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column']), use_container_width=True)
-                    with tab2:
+        with tab2:
             st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Beam']), use_container_width=True)
