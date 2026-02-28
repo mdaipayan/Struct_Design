@@ -419,13 +419,12 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
         st.header("7. Detailed Member Design Results")
         st.caption("Below are the internal forces, reinforcement requirements, and finalized geometries after optimization.")
         
-        tab1, tab2, tab3, tab4 = st.tabs(["Beams", "Columns", "Slabs", "Footings"])
-        
+        tab1, tab2, tab3, tab4 = st.tabs(["Slabs", "Beams", "Columns", "Footings"])
         with tab1:
-            st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Beam']), use_container_width=True)
-        with tab2:
-            st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column']), use_container_width=True)
-        with tab3:
             st.dataframe(pd.DataFrame(slabs), use_container_width=True)
+        with tab2:
+            st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Beam']), use_container_width=True)
+        with tab3:
+            st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column']), use_container_width=True)
         with tab4:
             st.dataframe(pd.DataFrame(footings), use_container_width=True)
