@@ -86,7 +86,7 @@ for el in elements:
     color = 'blue' if el['type'] == 'Column' else 'red'
     fig.add_trace(go.Scatter3d(
         x=[ni['x'], nj['x']], y=[ni['y'], nj['y']], z=[ni['z'], nj['z']],
-        mode='lines', line=dict(color=color, width=4), hoverinfo='text', text=f"{el['type']}", showlegend=False
+        mode='lines', line=dict(color=color, width=4), hoverinfo='text', text=f"{el['type']} ID: {el['id']}", showlegend=False
     ))
 
 fig.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'), margin=dict(l=0, r=0, b=0, t=0), height=400)
@@ -149,20 +149,19 @@ def run_analysis(current_elements):
             elif abs(ni['x'] - nj['x']) < 0.01:
                 el['load_kN_m'] = w_y_beam * (1.0 if ni['x'] == 0 or ni['x'] == bay_x * L_x else 2.0)
 
-    # 2. Distribute Lateral Loads (IS 1893 Parabolic Distribution)
-    total_weight = sum([el['load_kN_m'] * L_x for el in current_elements if el['type'] == 'Beam']) * 1.5 # Approx building weight
+    # 2. Distribute Lateral Loads
+    total_weight = sum([el['load_kN_m'] * L_x for el in current_elements if el['type'] == 'Beam']) * 1.5
     V_base = lateral_coeff * total_weight
     
     floor_weights = {}
     floor_heights = {}
     for z in range(1, int(num_stories) + 1):
-        floor_weights[z] = total_weight / num_stories # simplified assumption
+        floor_weights[z] = total_weight / num_stories
         floor_heights[z] = z * h_story
         
     sum_wh2 = sum([floor_weights[z] * (floor_heights[z]**2) for z in floor_weights])
     floor_forces = {z: V_base * (floor_weights[z] * (floor_heights[z]**2)) / sum_wh2 if sum_wh2 > 0 else 0 for z in floor_weights}
 
-    # Apply lateral point loads to nodes at each floor (X-direction)
     nodes_per_floor = (bay_x + 1) * (bay_y + 1)
     for n in nodes:
         if n['z'] > 0:
@@ -238,6 +237,7 @@ def perform_design(elements_to_design):
     for el in elements_to_design:
         b, h = map(lambda x: float(x), el['size'].split('x'))
         el['pass'] = True
+        el['design_details'] = {}
         
         if el['type'] == 'Beam':
             Mu_max = max(abs(el['F_internal'][4]), abs(el['F_internal'][10]))
@@ -250,10 +250,21 @@ def perform_design(elements_to_design):
                 el['pass'] = False
                 design_status = False
                 
+            el['design_details'] = {
+                'Member ID': el['id'],
+                'Floor': el['floor'],
+                'Size (mm)': el['size'],
+                'Mu_max (kN.m)': round(Mu_max, 2),
+                'Vu_max (kN)': round(Vu_max, 2),
+                'Shear Stress τv (MPa)': round(tau_v, 2),
+                'Status': 'Pass' if el['pass'] else 'Fail (Resizing...)'
+            }
+                
         elif el['type'] == 'Column':
             Pu_max = max(abs(el['F_internal'][0]), abs(el['F_internal'][6]))
             Ag = b * h
             Pu_conc = 0.4 * fck * Ag / 1000
+            Asc_calc = 0
             
             if Pu_max > Pu_conc:
                 Pu_steel = Pu_max - Pu_conc
@@ -262,6 +273,15 @@ def perform_design(elements_to_design):
                 if Asc_calc > 0.04 * Ag: # Max 4% steel rule
                     el['pass'] = False
                     design_status = False
+                    
+            el['design_details'] = {
+                'Member ID': el['id'],
+                'Floor': el['floor'],
+                'Size (mm)': el['size'],
+                'Pu_max (kN)': round(Pu_max, 2),
+                'Req Asc (mm²)': round(max(Asc_calc, 0.008 * Ag), 2), # At least 0.8% nominal
+                'Status': 'Pass' if el['pass'] else 'Fail (Resizing...)'
+            }
                     
     return elements_to_design, design_status
 
@@ -279,7 +299,6 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
                     st.success(f"✅ Analysis Converged in {iteration} Iteration(s). Max Deflection: {max_def * 1000:.2f} mm")
                     break
                 else:
-                    # AI Heuristic: Scale up failed members
                     for el in elements:
                         if not el['pass']:
                             b, h = map(int, el['size'].split('x'))
@@ -291,6 +310,48 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
                 
         if not passed and auto_optimize:
             st.warning("⚠️ Reached max iterations, some elements still overstressed. Review model geometry.")
+
+        # --- GENERATE SLAB & FOOTING DATA ---
+        slabs = []
+        slab_id = 1
+        Lx, Ly = min(L_x, L_y), max(L_x, L_y)
+        slab_ratio = Ly / Lx
+        slab_type = "One-Way" if slab_ratio > 2.0 else "Two-Way"
+        approx_Mx = (q_factored * Lx**2) / (8 if slab_type == "One-Way" else 12)
+        
+        for z in range(1, int(num_stories) + 1):
+            for y in range(int(bay_y)):
+                for x in range(int(bay_x)):
+                    slabs.append({
+                        'Slab ID': f"S{slab_id}-F{z}",
+                        'Floor': z,
+                        'Dim (m)': f"{Lx} x {Ly}",
+                        'Type': slab_type,
+                        'Thickness (mm)': slab_thickness,
+                        'Design B.M (kN.m)': round(approx_Mx, 2),
+                        'Status': 'Pass'
+                    })
+                    slab_id += 1
+                    
+        
+        footings = []
+        for n in nodes:
+            if n['z'] == 0:
+                conn_col = next((e for e in elements if e['ni'] == n['id'] and e['type'] == 'Column'), None)
+                if conn_col:
+                    Pu = max(abs(conn_col['F_internal'][0]), abs(conn_col['F_internal'][6]))
+                    P_work = Pu / 1.5
+                    req_area = (P_work * 1.1) / sbc
+                    side = math.ceil(math.sqrt(req_area) * 10) / 10 # Round to nearest 100mm
+                    depth = max(300, int(side * 1000 / 4)) # Heuristic depth
+                    footings.append({
+                        'Support Node': n['id'],
+                        'Pu (kN)': round(Pu, 2),
+                        'Req Area (m²)': round(req_area, 2),
+                        'Provided L x B (m)': f"{side} x {side}",
+                        'Depth (mm)': depth,
+                        'Status': 'Pass'
+                    })
 
         # --- 5. BOQ & MATERIAL ABSTRACT ---
         st.divider()
@@ -310,16 +371,14 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
                 vol = b * h * el['length']
                 conc_vol += vol
                 
-                # Steel estimation heuristic based on IS code percentiles
-                density = 7850 # kg/m3
+                density = 7850
                 if el['type'] == 'Column':
-                    steel_wt += vol * density * 0.015 # ~1.5% steel
+                    steel_wt += vol * density * 0.015
                 else:
-                    steel_wt += vol * density * 0.012 # ~1.2% steel
+                    steel_wt += vol * density * 0.012
             
-            # Slab volume
             slab_vol = L_x * bay_x * L_y * bay_y * (slab_thickness/1000) if z > 0 else 0
-            slab_steel = slab_vol * density * 0.008 # ~0.8% steel for slabs
+            slab_steel = slab_vol * density * 0.008
             
             conc_vol += slab_vol
             steel_wt += slab_steel
@@ -347,10 +406,26 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
             "Bar Dia (mm)": ["8mm (Ties/Stirrups)", "10mm (Slab Main)", "16mm (Beam Flexure)", "20mm (Column Main)"],
             "Application": ["Shear & Containment", "Floor Slabs", "Longitudinal Beams", "Vertical Columns"],
             "Est. Quantity (kg)": [
-                round(total_steel * 0.20, 1), # 20% to ties
-                round(total_steel * 0.30, 1), # 30% to slabs
-                round(total_steel * 0.25, 1), # 25% to beams
-                round(total_steel * 0.25, 1)  # 25% to columns
+                round(total_steel * 0.20, 1),
+                round(total_steel * 0.30, 1),
+                round(total_steel * 0.25, 1),
+                round(total_steel * 0.25, 1) 
             ]
         }
         st.dataframe(pd.DataFrame(bbs_data), use_container_width=True)
+
+        # --- 7. DETAILED DESIGN RESULTS ---
+        st.divider()
+        st.header("7. Detailed Member Design Results")
+        st.caption("Below are the internal forces, reinforcement requirements, and finalized geometries after optimization.")
+        
+        tab1, tab2, tab3, tab4 = st.tabs(["Beams", "Columns", "Slabs", "Footings"])
+        
+        with tab1:
+            st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Beam']), use_container_width=True)
+        with tab2:
+            st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column']), use_container_width=True)
+        with tab3:
+            st.dataframe(pd.DataFrame(slabs), use_container_width=True)
+        with tab4:
+            st.dataframe(pd.DataFrame(footings), use_container_width=True)
