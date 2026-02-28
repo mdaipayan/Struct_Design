@@ -390,3 +390,72 @@ if st.button("Distribute Loads & Assemble Matrices", type="primary"):
         
     except np.linalg.LinAlgError:
         st.error("Solver Failed: The Global Stiffness Matrix is singular. Check geometry and boundary conditions.")
+
+
+    
+    # =========================================================================
+    # 6. Calculate Element Internal Forces (Axial, Shear, Moment)
+    # =========================================================================
+    
+    # We only want to run this if the solver succeeded and U_global exists
+    if 'U_global' in locals():
+        
+        for el in elements:
+            # A. Re-fetch Geometry & Section Properties
+            ni_data = next(n for n in nodes if n['id'] == el['ni'])
+            nj_data = next(n for n in nodes if n['id'] == el['nj'])
+            
+            dx = nj_data['x'] - ni_data['x']
+            dy = nj_data['y'] - ni_data['y']
+            dz = nj_data['z'] - ni_data['z']
+            L = math.sqrt(dx**2 + dy**2 + dz**2)
+            
+            T_matrix = get_transformation_matrix(ni_data, nj_data)
+            
+            # Using the same concrete and section properties as before
+            E_conc = 25e6
+            G_conc = E_conc / (2 * (1 + 0.2))
+            b, h = 0.3, 0.45
+            A_sec = b * h; Iy_sec = (b * h**3) / 12.0; Iz_sec = (h * b**3) / 12.0
+            J_sec = (b**3 * h) * (1/3 - 0.21*(b/h)*(1 - (b**4)/(12*h**4)))
+            
+            k_local = get_local_stiffness_matrix(E_conc, G_conc, A_sec, Iy_sec, Iz_sec, J_sec, L)
+            
+            # B. Extract Global Displacements for this Element
+            i_dof = el['ni'] * 6
+            j_dof = el['nj'] * 6
+            
+            u_global = np.zeros(12)
+            u_global[0:6] = U_global[i_dof : i_dof + 6]
+            u_global[6:12] = U_global[j_dof : j_dof + 6]
+            
+            # C. Transform Global Displacements to Local Displacements
+            u_local = np.dot(T_matrix, u_global)
+            
+            # D. Reconstruct Equivalent Nodal Loads to get Fixed End Moments (FEM = -ENL)
+            F_local_ENL = np.zeros(12)
+            w = el.get('load_kN_m', 0.0)
+            if el['type'] == 'Beam' and w > 0:
+                V = (w * L) / 2.0
+                M = (w * L**2) / 12.0
+                F_local_ENL[2] = -V        # Downward shear force Z (Node i)
+                F_local_ENL[4] = -M        # Bending moment Y (Node i)
+                F_local_ENL[8] = -V        # Downward shear force Z (Node j)
+                F_local_ENL[10] = M        # Bending moment Y (Node j)
+                
+            # E. Final Internal Force Calculation: F = (k * u) - ENL
+            F_internal = np.dot(k_local, u_local) - F_local_ENL
+            
+            # Store the 12x1 internal force vector in the element dictionary
+            el['F_internal'] = F_internal
+
+        st.success("Successfully extracted internal forces (Axial, Shear, Bending, Torsion) for all elements.")
+        
+        # Optional: Print out the forces for Element 0 as a quick sanity check
+        el_0 = elements[0]
+        st.write(f"**Sample Output for {el_0['type']} 0 (Node {el_0['ni']} to {el_0['nj']}):**")
+        st.code(
+            f"Axial Force (N):  {el_0['F_internal'][0]:.2f} kN\n"
+            f"Shear Z (Vz):     {el_0['F_internal'][2]:.2f} kN\n"
+            f"Moment Y (My):    {el_0['F_internal'][4]:.2f} kN-m"
+        )
