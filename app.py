@@ -6,15 +6,11 @@ import pandas as pd
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="3D Building Frame Designer", layout="wide")
-st.title("🏢 3D Building Frame Analysis, Auto-Design & BoQ")
+st.title("🏢 3D Building Frame Analysis & Design")
 
 # --- SIDEBAR: PARAMETRIC INPUTS ---
 st.sidebar.header("1. Floor Elevations")
-st.sidebar.caption("Define varying floor heights.")
-default_floors = pd.DataFrame({
-    "Floor": [1, 2, 3],
-    "Height (m)": [3.2, 3.0, 3.0] # e.g. Ground floor is taller
-})
+default_floors = pd.DataFrame({"Floor": [1, 2, 3], "Height (m)": [3.2, 3.0, 3.0]})
 floor_data = st.sidebar.data_editor(default_floors, num_rows="dynamic", use_container_width=True)
 
 # Calculate cumulative Z elevations
@@ -25,62 +21,83 @@ for idx, row in floor_data.iterrows():
     z_elevations[int(row['Floor'])] = current_z
 num_stories = len(floor_data)
 
-st.sidebar.header("2. Column Layout (Unsymmetric)")
-st.sidebar.caption("Define specific positions and orientations based on Centerline Plan.")
-# Pre-filled with an approximate sample from the Gaidhane project
-default_cols = pd.DataFrame({
-    "Col_ID": ["C1", "C2", "C3", "C4", "C5", "C6"],
-    "X (m)": [0.0, 1.15, 4.11, 4.33, 8.04, 9.45],
-    "Y (m)": [0.0, 2.63, 4.99, 8.34, 4.99, 0.0],
-    "Angle (deg)": [0, 90, 90, 0, 90, 0]
-})
-col_data = st.sidebar.data_editor(default_cols, num_rows="dynamic", use_container_width=True)
+st.sidebar.header("2. Structural Grids (From Plan)")
+st.sidebar.caption("Extracted from Gaidhane Residence Centerline")
 
-st.sidebar.header("3. Base Section Properties")
+with st.sidebar.expander("Define X-Grids (Vertical Lines)", expanded=True):
+    default_x_grids = pd.DataFrame({
+        "Grid_ID": ["A", "B", "C", "D", "E", "F"],
+        "X_Coord (m)": [0.000, 0.115, 4.112, 4.331, 8.039, 9.449]
+    })
+    x_grid_data = st.data_editor(default_x_grids, num_rows="dynamic", use_container_width=True, key="x_grids")
+
+with st.sidebar.expander("Define Y-Grids (Horizontal Lines)", expanded=True):
+    default_y_grids = pd.DataFrame({
+        "Grid_ID": ["1", "2", "3", "4", "5", "6", "7"],
+        "Y_Coord (m)": [0.000, 2.630, 4.999, 8.343, 9.660, 13.220, 14.326]
+    })
+    y_grid_data = st.data_editor(default_y_grids, num_rows="dynamic", use_container_width=True, key="y_grids")
+
+st.sidebar.header("3. Column Placement (Grid Intersections)")
+st.sidebar.caption("Place columns at grid nodes. Add offsets if not perfectly centered.")
+
+# Build dictionary maps for quick coordinate lookup
+x_map = {str(row['Grid_ID']).strip(): float(row['X_Coord (m)']) for _, row in x_grid_data.iterrows() if pd.notna(row['Grid_ID'])}
+y_map = {str(row['Grid_ID']).strip(): float(row['Y_Coord (m)']) for _, row in y_grid_data.iterrows() if pd.notna(row['Grid_ID'])}
+
+with st.sidebar.expander("Column Locations & Orientations", expanded=True):
+    default_cols = pd.DataFrame({
+        "Col_ID": ["C1", "C2", "C3", "C4", "C5"],
+        "X_Grid": ["A", "B", "C", "D", "E"],
+        "Y_Grid": ["1", "2", "3", "4", "5"],
+        "X_Offset (m)": [0.0, 0.0, 0.0, 0.0, 0.0],
+        "Y_Offset (m)": [0.0, 0.0, 0.0, 0.0, 0.0],
+        "Angle (deg)": [0, 90, 90, 0, 90]
+    })
+    col_data = st.data_editor(default_cols, num_rows="dynamic", use_container_width=True)
+
+st.sidebar.header("4. Design & Load Parameters")
 col_dim = st.sidebar.text_input("Init Column Size (mm)", "230x450")
 beam_dim = st.sidebar.text_input("Init Beam Size (mm)", "230x400")
-
-col3, col4 = st.sidebar.columns(2)
-with col3:
-    fck = st.number_input("fck (MPa)", value=25.0, step=5.0)
-with col4:
-    fy = st.number_input("fy (MPa)", value=500.0, step=85.0)
-
-st.sidebar.header("4. Loading & Geotech")
-sbc = st.sidebar.number_input("Soil Bearing Capacity (kN/m²)", value=200.0, step=10.0)
-lateral_coeff = st.sidebar.slider("Lateral Load Coeff (% of Gravity)", 0.0, 20.0, 5.0) / 100.0
-
-st.sidebar.header("5. AI Optimization")
-auto_optimize = st.sidebar.checkbox("Enable Auto-Sizing (Iterative Redesign)", value=True)
-
-# --- GEOMETRY GENERATOR (UNSYMMETRIC) ---
-nodes = []
-elements = []
-node_id = 0
+fck = st.sidebar.number_input("fck (MPa)", value=25.0, step=5.0)
+fy = st.sidebar.number_input("fy (MPa)", value=500.0, step=85.0)
+sbc = st.sidebar.number_input("SBC (kN/m²)", value=200.0, step=10.0)
+lateral_coeff = st.sidebar.slider("Lateral Load Coeff (% of W)", 0.0, 20.0, 5.0) / 100.0
+auto_optimize = st.sidebar.checkbox("Enable Auto-Sizing", value=True)
 
 # Helper function to safely convert empty/null table cells to floats
 def safe_float(val, default=0.0):
     try:
-        if pd.isna(val) or val is None or str(val).strip() == "":
-            return default
+        if pd.isna(val) or val is None or str(val).strip() == "": return default
         return float(val)
-    except (ValueError, TypeError):
-        return default
+    except (ValueError, TypeError): return default
 
-# 1. Generate Nodes 
+# --- GEOMETRY GENERATOR (GRID-BASED) ---
+nodes = []
+elements = []
+node_id = 0
+
+# 1. Generate Nodes based on Grid Intersections
 for floor_idx in range(num_stories + 1):
     z_val = z_elevations.get(floor_idx, 0.0)
     for idx, row in col_data.iterrows():
-        nodes.append({
-            'id': node_id, 
-            'x': safe_float(row.get('X (m)')), 
-            'y': safe_float(row.get('Y (m)')), 
-            'z': z_val, 
-            'floor': floor_idx,
-            'angle': safe_float(row.get('Angle (deg)'))
-        })
-        node_id += 1
-
+        xg = str(row.get('X_Grid', '')).strip()
+        yg = str(row.get('Y_Grid', '')).strip()
+        
+        # Look up coordinates, apply offsets
+        if xg in x_map and yg in y_map:
+            calc_x = x_map[xg] + safe_float(row.get('X_Offset (m)'))
+            calc_y = y_map[yg] + safe_float(row.get('Y_Offset (m)'))
+            
+            nodes.append({
+                'id': node_id, 
+                'x': calc_x, 
+                'y': calc_y, 
+                'z': z_val, 
+                'floor': floor_idx,
+                'angle': safe_float(row.get('Angle (deg)'))
+            })
+            node_id += 1
 
 # 2. Generate Columns
 element_id = 0
@@ -95,7 +112,7 @@ for z in range(num_stories):
             element_id += 1
 
 # 3. Generate Beams (Auto-Routing via Proximity)
-tolerance = 0.5 # Snaps beams to columns that are slightly off-grid
+tolerance = 0.5 
 max_span_x = 0.1
 max_span_y = 0.1
 
@@ -109,8 +126,7 @@ for z in range(1, num_stories + 1):
         for y_key in y_groups.keys():
             if abs(n['y'] - y_key) <= tolerance:
                 y_groups[y_key].append(n)
-                matched = True
-                break
+                matched = True; break
         if not matched: y_groups[n['y']] = [n]
             
     for y_key, group in y_groups.items():
@@ -128,8 +144,7 @@ for z in range(1, num_stories + 1):
         for x_key in x_groups.keys():
             if abs(n['x'] - x_key) <= tolerance:
                 x_groups[x_key].append(n)
-                matched = True
-                break
+                matched = True; break
         if not matched: x_groups[n['x']] = [n]
             
     for x_key, group in x_groups.items():
@@ -153,13 +168,7 @@ for el in elements:
         mode='lines', line=dict(color=color, width=4), hoverinfo='text', text=f"{el['type']} ID: {el['id']}", showlegend=False
     ))
 
-mid_x = [(next(n for n in nodes if n['id'] == el['ni'])['x'] + next(n for n in nodes if n['id'] == el['nj'])['x'])/2 for el in elements]
-mid_y = [(next(n for n in nodes if n['id'] == el['ni'])['y'] + next(n for n in nodes if n['id'] == el['nj'])['y'])/2 for el in elements]
-mid_z = [(next(n for n in nodes if n['id'] == el['ni'])['z'] + next(n for n in nodes if n['id'] == el['nj'])['z'])/2 for el in elements]
-el_labels = [str(el['id']) for el in elements]
-
-fig.add_trace(go.Scatter3d(x=mid_x, y=mid_y, z=mid_z, mode='text', text=el_labels, textfont=dict(color='darkgreen', size=10), showlegend=False))
-
+# Plot node grids
 x_coords = [n['x'] for n in nodes]
 y_coords = [n['y'] for n in nodes]
 z_coords = [n['z'] for n in nodes]
@@ -168,13 +177,12 @@ fig.add_trace(go.Scatter3d(x=x_coords, y=y_coords, z=z_coords, mode='markers', m
 fig.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'), margin=dict(l=0, r=0, b=0, t=0), height=500)
 st.plotly_chart(fig, use_container_width=True)
 
-# --- LOAD DEFINITION ---
+# --- ANALYSIS ENGINE ---
 slab_thickness = 150
 dl_area = (slab_thickness / 1000.0) * 25.0 + 1.5 
 ll_area = 3.0
 q_factored = 1.5 * (dl_area + ll_area)
 
-# Matrix Helpers
 def get_transformation_matrix(ni, nj):
     dx, dy, dz = nj['x'] - ni['x'], nj['y'] - ni['y'], nj['z'] - ni['z']
     L = math.sqrt(dx**2 + dy**2 + dz**2)
@@ -201,25 +209,25 @@ def get_local_stiffness(E, G, A, Iy, Iz, J, L):
     k[1,5]=k[1,11]=k[5,1]=k[11,1]= 6*E*Iz/L**2; k[7,5]=k[7,11]=k[5,7]=k[11,7]= -6*E*Iz/L**2
     return k
 
-# Core Analysis Function
 def run_analysis(current_elements):
     num_nodes = len(nodes)
+    if num_nodes == 0: return current_elements, 0.0
     F_global = np.zeros(num_nodes * 6)
     E_conc = 5000 * math.sqrt(fck) * 1e3
     G_conc = E_conc / 2.4 
     
-    # 1. Distribute Gravity Loads (Arbitrary routing method)
+    # 1. Distribute Gravity Loads
     for el in current_elements:
         el['load_kN_m'] = 0.0
         if el['type'] == 'Beam':
             ni = next(n for n in nodes if n['id'] == el['ni'])
             nj = next(n for n in nodes if n['id'] == el['nj'])
             L = math.sqrt((nj['x']-ni['x'])**2 + (nj['y']-ni['y'])**2)
-            el['load_kN_m'] = q_factored * (L / 2.0) # Simplistic tributary assumption for unsymmetric
+            el['load_kN_m'] = q_factored * (L / 2.0) 
 
-    # 2. Distribute Lateral Loads (IS 1893)
+    # 2. Distribute Lateral Loads
     total_weight = sum([el['load_kN_m'] * el['length'] for el in current_elements if el['type'] == 'Beam' and 'length' in el] + [0]) * 1.5
-    if total_weight == 0: total_weight = 1000 # fallback
+    if total_weight == 0: total_weight = 1000 
     V_base = lateral_coeff * total_weight
     
     floor_weights = {z: total_weight / num_stories for z in range(1, num_stories + 1)}
@@ -231,7 +239,7 @@ def run_analysis(current_elements):
             nodes_this_floor = len([nd for nd in nodes if nd['floor'] == n['floor']])
             F_global[n['id'] * 6] += (floor_forces[n['floor']] / nodes_this_floor) if nodes_this_floor > 0 else 0
 
-    # 3. Assemble Global Matrices
+    # 3. Assemble Matrices
     for el in current_elements:
         ni_data = next(n for n in nodes if n['id'] == el['ni'])
         nj_data = next(n for n in nodes if n['id'] == el['nj'])
@@ -252,8 +260,7 @@ def run_analysis(current_elements):
         if el['type'] == 'Beam' and w > 0:
             V, M = (w * L) / 2.0, (w * L**2) / 12.0
             F_local_ENL = np.zeros(12)
-            F_local_ENL[2], F_local_ENL[4] = -V, -M
-            F_local_ENL[8], F_local_ENL[10] = -V, M
+            F_local_ENL[2], F_local_ENL[4], F_local_ENL[8], F_local_ENL[10] = -V, -M, -V, M
             P_global = np.dot(T_matrix.T, F_local_ENL)
             F_global[el['ni']*6 : el['ni']*6+6] += P_global[0:6]
             F_global[el['nj']*6 : el['nj']*6+6] += P_global[6:12]
@@ -270,11 +277,15 @@ def run_analysis(current_elements):
     fixed_dofs = [dof for n in nodes if n['z'] == 0 for dof in range(n['id'] * 6, n['id'] * 6 + 6)]
     free_dofs = sorted(list(set(range(num_nodes * 6)) - set(fixed_dofs)))
     
-    U_free = np.linalg.solve(K_global[np.ix_(free_dofs, free_dofs)], F_global[free_dofs])
+    try:
+        U_free = np.linalg.solve(K_global[np.ix_(free_dofs, free_dofs)], F_global[free_dofs])
+    except np.linalg.LinAlgError:
+        raise Exception("Matrix is singular. Check if columns are isolated or not connected properly.")
+        
     U_global = np.zeros(num_nodes * 6)
     U_global[free_dofs] = U_free
     
-    # 4. Extract Internal Forces
+    # 4. Internal Forces
     for el in current_elements:
         ni_data = next(n for n in nodes if n['id'] == el['ni'])
         nj_data = next(n for n in nodes if n['id'] == el['nj'])
@@ -298,7 +309,6 @@ def run_analysis(current_elements):
 
     return current_elements, np.max(np.abs(U_global))
 
-# --- DESIGN LOGIC & OPTIMIZATION LOOP ---
 def perform_design(elements_to_design):
     design_status = True
     for el in elements_to_design:
@@ -348,23 +358,18 @@ def perform_design(elements_to_design):
                     
     return elements_to_design, design_status
 
-# Helper for element grouping
 def group_elements(elements_list, elem_type):
     df = pd.DataFrame([el['design_details'] for el in elements_list if el['type'] == elem_type])
     if df.empty: return df
     if elem_type == 'Column':
         grouped = df.groupby(['Floor', 'Size (mm)', 'Orientation']).agg(
-            Max_Pu=('Pu_max (kN)', 'max'),
-            Max_Req_Asc=('Req Asc (mm²)', 'max'),
-            Member_Count=('Member ID', 'count')
+            Max_Pu=('Pu_max (kN)', 'max'), Max_Req_Asc=('Req Asc (mm²)', 'max'), Member_Count=('Member ID', 'count')
         ).reset_index()
         grouped['Group ID'] = [f"C{i+1}" for i in range(len(grouped))]
         return grouped
     elif elem_type == 'Beam':
         grouped = df.groupby(['Floor', 'Size (mm)']).agg(
-            Max_Mu=('Mu_max (kN.m)', 'max'),
-            Max_Vu=('Vu_max (kN)', 'max'),
-            Member_Count=('Member ID', 'count')
+            Max_Mu=('Mu_max (kN.m)', 'max'), Max_Vu=('Vu_max (kN)', 'max'), Member_Count=('Member ID', 'count')
         ).reset_index()
         grouped['Group ID'] = [f"B{i+1}" for i in range(len(grouped))]
         return grouped
@@ -374,7 +379,12 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
     with st.spinner("Analyzing Unsymmetric Grid Framing..."):
         iteration = 1
         max_iters = 5 if auto_optimize else 1
+        passed = False
         
+        if len(nodes) < 2:
+            st.error("Not enough valid nodes generated. Please check your grid definitions.")
+            st.stop()
+            
         while iteration <= max_iters:
             try:
                 elements, max_def = run_analysis(elements)
@@ -390,13 +400,13 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
                             el['size'] = f"{b}x{h+50}" if el['type'] == 'Beam' else f"{b+50}x{h+50}"
                     iteration += 1
             except Exception as e:
-                st.error(f"Solver Error (Likely Unstable Grid Geometry): {e}")
+                st.error(f"Solver Error: {e}")
                 st.stop()
                 
         if not passed and auto_optimize:
             st.warning("⚠️ Reached max iterations, some elements still overstressed. Review model geometry.")
 
-        # --- GENERATE TYPICAL SLAB ---
+        # --- SLABS ---
         slabs = []
         slab_ratio = max_span_y / max_span_x if max_span_x > 0 else 1.0
         slab_type = "One-Way" if slab_ratio > 2.0 else "Two-Way"
@@ -404,15 +414,12 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
         
         for z in range(1, num_stories + 1):
             slabs.append({
-                'Floor': z,
-                'Max Dim Found (m)': f"{round(max_span_x,2)} x {round(max_span_y,2)}",
-                'Behavior': slab_type,
-                'Thickness (mm)': slab_thickness,
-                'Critical Design B.M (kN.m)': round(approx_Mx, 2),
-                'Status': 'Pass'
+                'Floor': z, 'Max Dim Found (m)': f"{round(max_span_x,2)} x {round(max_span_y,2)}",
+                'Behavior': slab_type, 'Thickness (mm)': slab_thickness,
+                'Critical Design B.M (kN.m)': round(approx_Mx, 2), 'Status': 'Pass'
             })
                     
-        # --- COMBINED FOOTING LOGIC ---
+        # --- FOOTINGS ---
         base_nodes = [n for n in nodes if n['z'] == 0]
         footings = []
         pad_footings_dict = {}
@@ -430,15 +437,13 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
         footing_id = 1
 
         for n1_id, f1 in pad_footings_dict.items():
-            if n1_id in processed_nodes:
-                continue
+            if n1_id in processed_nodes: continue
                 
             combined_with = []
             for n2_id, f2 in pad_footings_dict.items():
                 if n1_id != n2_id and n2_id not in processed_nodes:
                     dist = math.sqrt((f1['x'] - f2['x'])**2 + (f1['y'] - f2['y'])**2)
-                    if dist < (f1['side'] / 2 + f2['side'] / 2):
-                        combined_with.append(n2_id)
+                    if dist < (f1['side'] / 2 + f2['side'] / 2): combined_with.append(n2_id)
             
             if combined_with:
                 group = [n1_id] + combined_with
@@ -463,114 +468,70 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
             processed_nodes.add(n1_id)
             footing_id += 1
 
-        # --- 5. BOQ & MATERIAL ABSTRACT ---
+        # --- 5. BOQ ---
         st.divider()
         st.header("5. Material Abstract & BoQ")
         materials = []
-        total_conc = 0
-        total_steel = 0
+        total_conc, total_steel = 0, 0
         
-        # Approximate Building Bounding Box Area for Slabs
-        X_coords = [n['x'] for n in nodes]
-        Y_coords = [n['y'] for n in nodes]
-        approx_floor_area = (max(X_coords) - min(X_coords)) * (max(Y_coords) - min(Y_coords)) * 0.8 # 80% of bounding box
+        X_coords, Y_coords = [n['x'] for n in nodes], [n['y'] for n in nodes]
+        approx_floor_area = (max(X_coords) - min(X_coords)) * (max(Y_coords) - min(Y_coords)) * 0.8 if X_coords else 0
         
         for z in range(num_stories + 1):
-            conc_vol = 0
-            steel_wt = 0
-            floor_els = [el for el in elements if el['floor'] == z]
-            
-            for el in floor_els:
+            conc_vol, steel_wt = 0, 0
+            for el in [el for el in elements if el['floor'] == z]:
                 b, h = map(lambda x: float(x)/1000, el['size'].split('x'))
                 vol = b * h * el['length']
                 conc_vol += vol
-                density = 7850
-                steel_wt += vol * density * (0.015 if el['type'] == 'Column' else 0.012)
+                steel_wt += vol * 7850 * (0.015 if el['type'] == 'Column' else 0.012)
             
             slab_vol = approx_floor_area * (slab_thickness/1000) if z > 0 else 0
-            slab_steel = slab_vol * density * 0.008
+            slab_steel = slab_vol * 7850 * 0.008
             
             conc_vol += slab_vol
             steel_wt += slab_steel
             total_conc += conc_vol
             total_steel += steel_wt
             
-            if conc_vol > 0:
-                materials.append({"Floor": f"Level {z}", "Concrete (m³)": round(conc_vol, 2), "Steel (kg)": round(steel_wt, 2)})
+            if conc_vol > 0: materials.append({"Floor": f"Level {z}", "Concrete (m³)": round(conc_vol, 2), "Steel (kg)": round(steel_wt, 2)})
                 
         colA, colB = st.columns(2)
-        with colA:
-            st.subheader("Floor-wise Quantities")
-            st.dataframe(pd.DataFrame(materials), use_container_width=True)
-        with colB:
-            st.subheader("Total Project Estimate")
-            st.metric("Total Concrete Volume", f"{total_conc:.2f} m³")
-            st.metric("Total Rebar Weight", f"{total_steel / 1000:.2f} MT")
+        colA.dataframe(pd.DataFrame(materials), use_container_width=True)
+        colB.metric("Total Concrete Volume", f"{total_conc:.2f} m³")
+        colB.metric("Total Rebar Weight", f"{total_steel / 1000:.2f} MT")
             
-        # --- 6. SIMPLIFIED BBS ---
         st.divider()
-        st.header("6. Bar Bending Schedule (BBS) Abstract")
-        st.caption("Estimated tonnage distribution by standard bar diameters.")
-        bbs_data = {
-            "Bar Dia (mm)": ["8mm (Ties/Stirrups)", "10mm (Slab Main)", "16mm (Beam Flexure)", "20mm (Column Main)"],
-            "Application": ["Shear & Containment", "Floor Slabs", "Longitudinal Beams", "Vertical Columns"],
-            "Est. Quantity (kg)": [
-                round(total_steel * 0.20, 1), round(total_steel * 0.30, 1),
-                round(total_steel * 0.25, 1), round(total_steel * 0.25, 1) 
-            ]
-        }
-        st.dataframe(pd.DataFrame(bbs_data), use_container_width=True)
-
-        # --- 7. DETAILED DESIGN RESULTS & GROUPING ---
-        st.divider()
-        st.header("7. Standardized Element Grouping")
-        st.caption("Elements grouped by floor, size, and orientation for uniform site execution.")
+        st.header("6. Detailed Results & Grouping")
+        
         col_grp1, col_grp2 = st.columns(2)
-        with col_grp1:
-            st.subheader("Beam Groups")
-            st.dataframe(group_elements(elements, 'Beam'), use_container_width=True)
-        with col_grp2:
-            st.subheader("Column Groups")
-            st.dataframe(group_elements(elements, 'Column'), use_container_width=True)
+        col_grp1.subheader("Beam Groups")
+        col_grp1.dataframe(group_elements(elements, 'Beam'), use_container_width=True)
+        col_grp2.subheader("Column Groups")
+        col_grp2.dataframe(group_elements(elements, 'Column'), use_container_width=True)
 
-        st.subheader("Detailed Member Results")
-        st.caption("Internal forces, reinforcement requirements, and finalized geometries.")
         tab1, tab2, tab3, tab4 = st.tabs(["Slabs", "Beams", "Columns", "Footings"])
-        with tab1:
-            st.dataframe(pd.DataFrame(slabs), use_container_width=True)
-        with tab2:
-            st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Beam']), use_container_width=True)
-        with tab3:
-            st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column']), use_container_width=True)
-        with tab4:
-            st.dataframe(pd.DataFrame(footings), use_container_width=True)
+        tab1.dataframe(pd.DataFrame(slabs), use_container_width=True)
+        tab2.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Beam']), use_container_width=True)
+        tab3.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column']), use_container_width=True)
+        tab4.dataframe(pd.DataFrame(footings), use_container_width=True)
 
-        # --- 8. FOUNDATION ECONOMICS ---
+        # --- 7. FOUNDATION ECONOMICS ---
         st.divider()
-        st.header("8. Foundation Economics: Pad vs. Under-Reamed Pile")
-        st.caption("Pile lengths are dynamically calculated based on individual column loads and SBC.")
-
+        st.header("7. Foundation Economics: Pad vs. Pile")
         col_rates1, col_rates2, col_rates3 = st.columns(3)
         rate_conc = col_rates1.number_input("Concrete Rate (per m³)", value=6000.0)
         rate_steel = col_rates2.number_input("Steel Rate (per kg)", value=65.0)
         d_pile = col_rates3.selectbox("Pile Shaft Dia (m)", [0.25, 0.30, 0.40], index=1)
 
-        # 1. Pad/Combined Footing Total Cost
         vol_pad_total = sum([float(f['Provided L x B (m)'].split(' x ')[0]) * float(f['Provided L x B (m)'].split(' x ')[1]) * (f['Depth (mm)']/1000) for f in footings])
         steel_pad_total = vol_pad_total * 7850 * 0.008 
         cost_pad = (vol_pad_total * rate_conc) + (steel_pad_total * rate_steel)
 
-        # 2. Dynamic Pile Footing Calculation
-        FOS = 2.5
-        N_c = 9.0
-        alpha = 0.5 
+        FOS, N_c, alpha = 2.5, 9.0, 0.5 
         c_u = (sbc * FOS) / N_c 
         d_bulb = 2.5 * d_pile
-        A_bulb = (math.pi / 4) * (d_bulb**2)
-        perimeter = math.pi * d_pile
-
-        safe_end_bearing = (c_u * N_c * A_bulb) / FOS
-        safe_friction_per_m = (alpha * c_u * perimeter) / FOS
+        safe_end_bearing = (c_u * N_c * ((math.pi / 4) * (d_bulb**2))) / FOS
+        safe_friction_per_m = (alpha * c_u * (math.pi * d_pile)) / FOS
 
         vol_pile_total = 0.0
         pile_details = []
@@ -579,14 +540,10 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
             conn_col = next((e for e in elements if e['ni'] == n['id'] and e['type'] == 'Column'), None)
             if conn_col:
                 Pu = max(abs(conn_col['F_internal'][0]), abs(conn_col['F_internal'][6]))
-                req_friction = Pu - safe_end_bearing
-                L_req = req_friction / safe_friction_per_m if req_friction > 0 else 0
+                L_req = (Pu - safe_end_bearing) / safe_friction_per_m if (Pu - safe_end_bearing) > 0 else 0
                 L_pile = max(3.0, round(L_req, 1)) 
                 
-                v_shaft = (math.pi / 4) * (d_pile**2) * L_pile
-                v_bulb = (math.pi / 6) * (d_bulb**3 - d_pile**3) 
-                v_total_node = v_shaft + v_bulb
-                
+                v_total_node = ((math.pi / 4) * (d_pile**2) * L_pile) + ((math.pi / 6) * (d_bulb**3 - d_pile**3))
                 vol_pile_total += v_total_node
                 pile_details.append({'Node': n['id'], 'Pu (kN)': round(Pu,1), 'Req. Length (m)': L_pile, 'Vol (m³)': round(v_total_node, 2)})
 
@@ -596,10 +553,8 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
         st.write(f"**Pad/Combined Foundation Est.:** ₹ {cost_pad:,.2f} (Vol: {vol_pad_total:.1f} m³)")
         st.write(f"**Under-Reamed Pile Foundation Est.:** ₹ {cost_pile:,.2f} (Vol: {vol_pile_total:.1f} m³)")
 
-        if cost_pile < cost_pad:
-            st.success("💡 Recommendation: Under-Reamed Piles are more economical for this SBC and load distribution.")
-        else:
-            st.info("💡 Recommendation: Standard Pad/Combined footings are more economical.")
+        if cost_pile < cost_pad: st.success("💡 Recommendation: Under-Reamed Piles are more economical.")
+        else: st.info("💡 Recommendation: Standard Pad/Combined footings are more economical.")
             
         with st.expander("View Dynamic Pile Lengths per Column"):
             st.dataframe(pd.DataFrame(pile_details), use_container_width=True)
