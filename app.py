@@ -428,3 +428,75 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
             st.dataframe(pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column']), use_container_width=True)
         with tab4:
             st.dataframe(pd.DataFrame(footings), use_container_width=True)
+
+        # --- 8. FOUNDATION ECONOMICS ---
+        st.divider()
+        st.header("8. Foundation Economics: Pad vs. Under-Reamed Pile")
+        st.caption("Pile lengths are dynamically calculated based on individual column loads and SBC.")
+
+        # User inputs for base rates and pile diameter
+        col_rates1, col_rates2, col_rates3 = st.columns(3)
+        rate_conc = col_rates1.number_input("Concrete Rate (per m³)", value=6000.0)
+        rate_steel = col_rates2.number_input("Steel Rate (per kg)", value=65.0)
+        d_pile = col_rates3.selectbox("Pile Shaft Dia (m)", [0.25, 0.30, 0.40], index=1)
+
+        # 1. Pad Footing Total Cost
+        vol_pad_total = 0.0
+        for f in footings:
+            l, b = map(float, f['Provided L x B (m)'].split(' x '))
+            d = f['Depth (mm)'] / 1000.0
+            vol_pad_total += l * b * d
+            
+        steel_pad_total = vol_pad_total * 7850 * 0.008 # Assumed 0.8% steel for pads
+        cost_pad = (vol_pad_total * rate_conc) + (steel_pad_total * rate_steel)
+
+        # 2. Dynamic Pile Footing Calculation
+        FOS = 2.5
+        N_c = 9.0
+        alpha = 0.5 # Adhesion factor for skin friction
+
+        # Derive approximate soil properties from SBC
+        c_u = (sbc * FOS) / N_c 
+        d_bulb = 2.5 * d_pile
+        A_bulb = (math.pi / 4) * (d_bulb**2)
+        perimeter = math.pi * d_pile
+
+        safe_end_bearing = (c_u * N_c * A_bulb) / FOS
+        safe_friction_per_m = (alpha * c_u * perimeter) / FOS
+
+        vol_pile_total = 0.0
+        pile_details = []
+        base_nodes = [n for n in nodes if n['z'] == 0]
+
+        for n in base_nodes:
+            conn_col = next((e for e in elements if e['ni'] == n['id'] and e['type'] == 'Column'), None)
+            if conn_col:
+                Pu = max(abs(conn_col['F_internal'][0]), abs(conn_col['F_internal'][6]))
+                
+                # Calculate required friction and resulting length
+                req_friction = Pu - safe_end_bearing
+                L_req = req_friction / safe_friction_per_m if req_friction > 0 else 0
+                L_pile = max(3.0, round(L_req, 1)) # Minimum practical length of 3m
+                
+                # Calculate volumes
+                v_shaft = (math.pi / 4) * (d_pile**2) * L_pile
+                v_bulb = (math.pi / 6) * (d_bulb**3 - d_pile**3) 
+                v_total_node = v_shaft + v_bulb
+                
+                vol_pile_total += v_total_node
+                pile_details.append({'Node': n['id'], 'Pu (kN)': round(Pu,1), 'Req. Length (m)': L_pile, 'Vol (m³)': round(v_total_node, 2)})
+
+        steel_pile_total = vol_pile_total * 7850 * 0.015 # Assumed 1.5% steel for piles
+        cost_pile = (vol_pile_total * rate_conc) + (steel_pile_total * rate_steel)
+
+        # Output the comparison
+        st.write(f"**Isolated/Combined Pad Foundation Est.:** ₹ {cost_pad:,.2f} (Vol: {vol_pad_total:.1f} m³)")
+        st.write(f"**Under-Reamed Pile Foundation Est.:** ₹ {cost_pile:,.2f} (Vol: {vol_pile_total:.1f} m³)")
+
+        if cost_pile < cost_pad:
+            st.success("💡 Recommendation: Under-Reamed Piles are more economical for this SBC and load distribution.")
+        else:
+            st.info("💡 Recommendation: Standard Pad/Combined footings are more economical.")
+            
+        with st.expander("View Dynamic Pile Lengths per Column"):
+            st.dataframe(pd.DataFrame(pile_details), use_container_width=True)
