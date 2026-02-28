@@ -6,7 +6,7 @@ import pandas as pd
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="3D Building Frame Designer", layout="wide")
-st.title("🏢 3D Building Frame Analysis & Design")
+st.title("🏢 3D Building Frame Analysis, Auto-Design & BoQ")
 
 # --- SIDEBAR: PARAMETRIC INPUTS ---
 st.sidebar.header("1. Floor Elevations")
@@ -39,9 +39,6 @@ with st.sidebar.expander("Define Y-Grids (Horizontal Lines)", expanded=True):
     y_grid_data = st.data_editor(default_y_grids, num_rows="dynamic", use_container_width=True, key="y_grids")
 
 st.sidebar.header("3. Column Placement (Grid Intersections)")
-st.sidebar.caption("Place columns at grid nodes. Add offsets if not perfectly centered.")
-
-# Build dictionary maps for quick coordinate lookup
 x_map = {str(row['Grid_ID']).strip(): float(row['X_Coord (m)']) for _, row in x_grid_data.iterrows() if pd.notna(row['Grid_ID'])}
 y_map = {str(row['Grid_ID']).strip(): float(row['Y_Coord (m)']) for _, row in y_grid_data.iterrows() if pd.notna(row['Grid_ID'])}
 
@@ -63,7 +60,10 @@ fck = st.sidebar.number_input("fck (MPa)", value=25.0, step=5.0)
 fy = st.sidebar.number_input("fy (MPa)", value=500.0, step=85.0)
 sbc = st.sidebar.number_input("SBC (kN/m²)", value=200.0, step=10.0)
 lateral_coeff = st.sidebar.slider("Lateral Load Coeff (% of W)", 0.0, 20.0, 5.0) / 100.0
-auto_optimize = st.sidebar.checkbox("Enable Auto-Sizing", value=True)
+
+st.sidebar.header("5. AI Optimization Options")
+auto_optimize = st.sidebar.checkbox("Enable Section Auto-Sizing", value=True)
+allow_ai_restructure = st.sidebar.checkbox("Allow AI Structural Restructuring (Add Columns if spans fail)", value=True)
 
 # Helper function to safely convert empty/null table cells to floats
 def safe_float(val, default=0.0):
@@ -72,155 +72,135 @@ def safe_float(val, default=0.0):
         return float(val)
     except (ValueError, TypeError): return default
 
-# --- GEOMETRY GENERATOR (GRID-BASED) ---
-nodes = []
-elements = []
-node_id = 0
-
-# 1. Generate Nodes based on Grid Intersections
-for floor_idx in range(num_stories + 1):
-    z_val = z_elevations.get(floor_idx, 0.0)
-    for idx, row in col_data.iterrows():
-        xg = str(row.get('X_Grid', '')).strip()
-        yg = str(row.get('Y_Grid', '')).strip()
-        
-        # Look up coordinates, apply offsets
-        if xg in x_map and yg in y_map:
-            calc_x = x_map[xg] + safe_float(row.get('X_Offset (m)'))
-            calc_y = y_map[yg] + safe_float(row.get('Y_Offset (m)'))
+# --- GEOMETRY GENERATOR FUNCTION ---
+def build_geometry(xy_list, z_dict, n_stories, c_dim, b_dim):
+    gen_nodes = []
+    gen_elements = []
+    nid = 0
+    for floor_idx in range(n_stories + 1):
+        z_val = z_dict.get(floor_idx, 0.0)
+        for pt in xy_list:
+            gen_nodes.append({'id': nid, 'x': pt['x'], 'y': pt['y'], 'z': z_val, 'floor': floor_idx, 'angle': pt.get('angle', 0)})
+            nid += 1
             
-            nodes.append({
-                'id': node_id, 
-                'x': calc_x, 
-                'y': calc_y, 
-                'z': z_val, 
-                'floor': floor_idx,
-                'angle': safe_float(row.get('Angle (deg)'))
-            })
-            node_id += 1
+    eid = 0
+    for z in range(n_stories):
+        bottom_nodes = [n for n in gen_nodes if n['floor'] == z]
+        top_nodes = [n for n in gen_nodes if n['floor'] == z + 1]
+        for bn in bottom_nodes:
+            tn = next((n for n in top_nodes if abs(n['x'] - bn['x']) < 0.01 and abs(n['y'] - bn['y']) < 0.01), None)
+            if tn:
+                gen_elements.append({'id': eid, 'ni': bn['id'], 'nj': tn['id'], 'type': 'Column', 'floor': z, 'size': c_dim, 'angle': bn['angle']})
+                eid += 1
+                
+    tolerance = 0.5 
+    for z in range(1, n_stories + 1):
+        floor_nodes = [n for n in gen_nodes if n['floor'] == z]
+        y_groups = {}
+        for n in floor_nodes:
+            matched = False
+            for y_key in y_groups.keys():
+                if abs(n['y'] - y_key) <= tolerance:
+                    y_groups[y_key].append(n)
+                    matched = True; break
+            if not matched: y_groups[n['y']] = [n]
+                
+        for y_key, group in y_groups.items():
+            group = sorted(group, key=lambda k: k['x'])
+            for i in range(len(group)-1):
+                gen_elements.append({'id': eid, 'ni': group[i]['id'], 'nj': group[i+1]['id'], 'type': 'Beam', 'floor': z, 'size': b_dim, 'angle': 0})
+                eid += 1
+                
+        x_groups = {}
+        for n in floor_nodes:
+            matched = False
+            for x_key in x_groups.keys():
+                if abs(n['x'] - x_key) <= tolerance:
+                    x_groups[x_key].append(n)
+                    matched = True; break
+            if not matched: x_groups[n['x']] = [n]
+                
+        for x_key, group in x_groups.items():
+            group = sorted(group, key=lambda k: k['y'])
+            for i in range(len(group)-1):
+                gen_elements.append({'id': eid, 'ni': group[i]['id'], 'nj': group[i+1]['id'], 'type': 'Beam', 'floor': z, 'size': b_dim, 'angle': 0})
+                eid += 1
+                
+    return gen_nodes, gen_elements
 
-# 2. Generate Columns
-element_id = 0
-for z in range(num_stories):
-    bottom_nodes = [n for n in nodes if n['floor'] == z]
-    top_nodes = [n for n in nodes if n['floor'] == z + 1]
-    
-    for bn in bottom_nodes:
-        tn = next((n for n in top_nodes if abs(n['x'] - bn['x']) < 0.01 and abs(n['y'] - bn['y']) < 0.01), None)
-        if tn:
-            elements.append({'id': element_id, 'ni': bn['id'], 'nj': tn['id'], 'type': 'Column', 'floor': z, 'size': col_dim, 'angle': bn['angle']})
-            element_id += 1
+# Extract initial coordinates from UI table
+xy_points = []
+for idx, row in col_data.iterrows():
+    xg = str(row.get('X_Grid', '')).strip()
+    yg = str(row.get('Y_Grid', '')).strip()
+    if xg in x_map and yg in y_map:
+        calc_x = x_map[xg] + safe_float(row.get('X_Offset (m)'))
+        calc_y = y_map[yg] + safe_float(row.get('Y_Offset (m)'))
+        xy_points.append({'x': calc_x, 'y': calc_y, 'angle': safe_float(row.get('Angle (deg)'))})
 
-# 3. Generate Beams (Auto-Routing via Proximity)
-tolerance = 0.5 
-max_span_x = 0.1
-max_span_y = 0.1
+# Build Initial Geometry
+nodes, elements = build_geometry(xy_points, z_elevations, num_stories, col_dim, beam_dim)
 
-for z in range(1, num_stories + 1):
-    floor_nodes = [n for n in nodes if n['floor'] == z]
-    
-    # Route X-Beams
-    y_groups = {}
-    for n in floor_nodes:
-        matched = False
-        for y_key in y_groups.keys():
-            if abs(n['y'] - y_key) <= tolerance:
-                y_groups[y_key].append(n)
-                matched = True; break
-        if not matched: y_groups[n['y']] = [n]
-            
-    for y_key, group in y_groups.items():
-        group = sorted(group, key=lambda k: k['x'])
-        for i in range(len(group)-1):
-            span = abs(group[i]['x'] - group[i+1]['x'])
-            if span > max_span_x: max_span_x = span
-            elements.append({'id': element_id, 'ni': group[i]['id'], 'nj': group[i+1]['id'], 'type': 'Beam', 'floor': z, 'size': beam_dim, 'angle': 0})
-            element_id += 1
-            
-    # Route Y-Beams
-    x_groups = {}
-    for n in floor_nodes:
-        matched = False
-        for x_key in x_groups.keys():
-            if abs(n['x'] - x_key) <= tolerance:
-                x_groups[x_key].append(n)
-                matched = True; break
-        if not matched: x_groups[n['x']] = [n]
-            
-    for x_key, group in x_groups.items():
-        group = sorted(group, key=lambda k: k['y'])
-        for i in range(len(group)-1):
-            span = abs(group[i]['y'] - group[i+1]['y'])
-            if span > max_span_y: max_span_y = span
-            elements.append({'id': element_id, 'ni': group[i]['id'], 'nj': group[i+1]['id'], 'type': 'Beam', 'floor': z, 'size': beam_dim, 'angle': 0})
-            element_id += 1
+# --- VIEWPORT RENDERING FUNCTION ---
+def render_viewport(view_nodes, view_elements, title="Structural Model Viewport", suffix="1"):
+    st.subheader(title)
+    col_view1, col_view2 = st.columns(2)
+    show_arch_grids = col_view1.checkbox("Show Architectural Grids (Base)", value=True, key=f"grid_tog_{suffix}")
+    show_axis = col_view2.checkbox("Show 3D Axis Mesh & Background", value=True, key=f"axis_tog_{suffix}")
 
-# --- 3D VISUALIZATION WITH GRIDS ---
-st.subheader("Structural Model Viewport")
+    fig = go.Figure()
 
-col_view1, col_view2 = st.columns(2)
-show_arch_grids = col_view1.checkbox("Show Architectural Grids (Base)", value=True)
-show_axis = col_view2.checkbox("Show 3D Axis Mesh & Background", value=True)
+    for el in view_elements:
+        ni = next(n for n in view_nodes if n['id'] == el['ni'])
+        nj = next(n for n in view_nodes if n['id'] == el['nj'])
+        color = 'blue' if el['type'] == 'Column' else 'red'
+        fig.add_trace(go.Scatter3d(
+            x=[ni['x'], nj['x']], y=[ni['y'], nj['y']], z=[ni['z'], nj['z']],
+            mode='lines', line=dict(color=color, width=4), hoverinfo='text', text=f"{el['type']} ID: {el['id']}", showlegend=False
+        ))
 
-fig = go.Figure()
+    if show_arch_grids and x_map and y_map:
+        min_x, max_x = min(x_map.values()), max(x_map.values())
+        min_y, max_y = min(y_map.values()), max(y_map.values())
+        grid_extension = 1.5 
+        for grid_id, y_val in y_map.items():
+            fig.add_trace(go.Scatter3d(
+                x=[min_x - grid_extension, max_x + grid_extension], y=[y_val, y_val], z=[0, 0],
+                mode='lines+text', line=dict(color='gray', width=2, dash='dash'),
+                text=[f"Grid {grid_id}", ''], textposition='middle left', hoverinfo='none', showlegend=False
+            ))
+        for grid_id, x_val in x_map.items():
+            fig.add_trace(go.Scatter3d(
+                x=[x_val, x_val], y=[min_y - grid_extension, max_y + grid_extension], z=[0, 0],
+                mode='lines+text', line=dict(color='gray', width=2, dash='dash'),
+                text=[f"Grid {grid_id}", ''], textposition='bottom center', hoverinfo='none', showlegend=False
+            ))
 
-for el in elements:
-    ni = next(n for n in nodes if n['id'] == el['ni'])
-    nj = next(n for n in nodes if n['id'] == el['nj'])
-    color = 'blue' if el['type'] == 'Column' else 'red'
+    x_coords = [n['x'] for n in view_nodes]
+    y_coords = [n['y'] for n in view_nodes]
+    z_coords = [n['z'] for n in view_nodes]
     fig.add_trace(go.Scatter3d(
-        x=[ni['x'], nj['x']], y=[ni['y'], nj['y']], z=[ni['z'], nj['z']],
-        mode='lines', line=dict(color=color, width=4), hoverinfo='text', text=f"{el['type']} ID: {el['id']}", showlegend=False
+        x=x_coords, y=y_coords, z=z_coords, mode='markers', 
+        marker=dict(size=4, color='black'), hoverinfo='text', 
+        text=[f"Node: {n['id']}" for n in view_nodes], showlegend=False
     ))
 
-# Plot Architectural Grids at Z=0
-if show_arch_grids and x_map and y_map:
-    min_x, max_x = min(x_map.values()), max(x_map.values())
-    min_y, max_y = min(y_map.values()), max(y_map.values())
-    grid_extension = 1.5 
-    
-    for grid_id, y_val in y_map.items():
-        fig.add_trace(go.Scatter3d(
-            x=[min_x - grid_extension, max_x + grid_extension], y=[y_val, y_val], z=[0, 0],
-            mode='lines+text', line=dict(color='gray', width=2, dash='dash'),
-            text=[f"Grid {grid_id}", ''], textposition='middle left',
-            hoverinfo='none', showlegend=False
-        ))
-        
-    for grid_id, x_val in x_map.items():
-        fig.add_trace(go.Scatter3d(
-            x=[x_val, x_val], y=[min_y - grid_extension, max_y + grid_extension], z=[0, 0],
-            mode='lines+text', line=dict(color='gray', width=2, dash='dash'),
-            text=[f"Grid {grid_id}", ''], textposition='bottom center',
-            hoverinfo='none', showlegend=False
-        ))
+    if show_axis: axis_config = dict(showbackground=True, showgrid=True, zeroline=True)
+    else: axis_config = dict(showbackground=False, showgrid=False, zeroline=False, showticklabels=False)
 
-x_coords = [n['x'] for n in nodes]
-y_coords = [n['y'] for n in nodes]
-z_coords = [n['z'] for n in nodes]
-fig.add_trace(go.Scatter3d(
-    x=x_coords, y=y_coords, z=z_coords, mode='markers', 
-    marker=dict(size=4, color='black'), hoverinfo='text', 
-    text=[f"Node: {n['id']}" for n in nodes], showlegend=False
-))
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(**axis_config, title='X (m)' if show_axis else ''),
+            yaxis=dict(**axis_config, title='Y (m)' if show_axis else ''),
+            zaxis=dict(**axis_config, title='Z (m)' if show_axis else ''),
+            aspectmode='data'
+        ), 
+        margin=dict(l=0, r=0, b=0, t=0), height=500
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-# Configure Axis Mesh Visibility safely
-if show_axis:
-    axis_config = dict(showbackground=True, showgrid=True, zeroline=True)
-else:
-    axis_config = dict(showbackground=False, showgrid=False, zeroline=False, showticklabels=False)
-
-fig.update_layout(
-    scene=dict(
-        xaxis=dict(**axis_config, title='X (m)' if show_axis else ''),
-        yaxis=dict(**axis_config, title='Y (m)' if show_axis else ''),
-        zaxis=dict(**axis_config, title='Z (m)' if show_axis else ''),
-        aspectmode='data'
-    ), 
-    margin=dict(l=0, r=0, b=0, t=0), 
-    height=600
-)
-st.plotly_chart(fig, use_container_width=True)
+# Render Initial Viewport
+render_viewport(nodes, elements, "Initial User Model", "init")
 
 # --- ANALYSIS ENGINE ---
 slab_thickness = 150
@@ -254,23 +234,22 @@ def get_local_stiffness(E, G, A, Iy, Iz, J, L):
     k[1,5]=k[1,11]=k[5,1]=k[11,1]= 6*E*Iz/L**2; k[7,5]=k[7,11]=k[5,7]=k[11,7]= -6*E*Iz/L**2
     return k
 
-def run_analysis(current_elements):
-    num_nodes = len(nodes)
+def run_analysis(current_elements, current_nodes):
+    num_nodes = len(current_nodes)
     if num_nodes == 0: return current_elements, 0.0
     F_global = np.zeros(num_nodes * 6)
     E_conc = 5000 * math.sqrt(fck) * 1e3
     G_conc = E_conc / 2.4 
     
-    # 1. Distribute Gravity Loads
+    # Loads
     for el in current_elements:
         el['load_kN_m'] = 0.0
         if el['type'] == 'Beam':
-            ni = next(n for n in nodes if n['id'] == el['ni'])
-            nj = next(n for n in nodes if n['id'] == el['nj'])
+            ni = next(n for n in current_nodes if n['id'] == el['ni'])
+            nj = next(n for n in current_nodes if n['id'] == el['nj'])
             L = math.sqrt((nj['x']-ni['x'])**2 + (nj['y']-ni['y'])**2)
             el['load_kN_m'] = q_factored * (L / 2.0) 
 
-    # 2. Distribute Lateral Loads
     total_weight = sum([el['load_kN_m'] * el['length'] for el in current_elements if el['type'] == 'Beam' and 'length' in el] + [0]) * 1.5
     if total_weight == 0: total_weight = 1000 
     V_base = lateral_coeff * total_weight
@@ -279,15 +258,15 @@ def run_analysis(current_elements):
     sum_wh2 = sum([floor_weights[z] * (z_elevations[z]**2) for z in floor_weights])
     floor_forces = {z: V_base * (floor_weights[z] * (z_elevations[z]**2)) / sum_wh2 if sum_wh2 > 0 else 0 for z in floor_weights}
 
-    for n in nodes:
+    for n in current_nodes:
         if n['z'] > 0:
-            nodes_this_floor = len([nd for nd in nodes if nd['floor'] == n['floor']])
+            nodes_this_floor = len([nd for nd in current_nodes if nd['floor'] == n['floor']])
             F_global[n['id'] * 6] += (floor_forces[n['floor']] / nodes_this_floor) if nodes_this_floor > 0 else 0
 
-    # 3. Assemble Matrices
+    # Matrices
     for el in current_elements:
-        ni_data = next(n for n in nodes if n['id'] == el['ni'])
-        nj_data = next(n for n in nodes if n['id'] == el['nj'])
+        ni_data = next(n for n in current_nodes if n['id'] == el['ni'])
+        nj_data = next(n for n in current_nodes if n['id'] == el['nj'])
         L = math.sqrt((nj_data['x']-ni_data['x'])**2 + (nj_data['y']-ni_data['y'])**2 + (nj_data['z']-ni_data['z'])**2)
         el['length'] = L
         
@@ -319,7 +298,7 @@ def run_analysis(current_elements):
         K_global[j_dof:j_dof+6, i_dof:i_dof+6] += k_g[6:12, 0:6]
         K_global[j_dof:j_dof+6, j_dof:j_dof+6] += k_g[6:12, 6:12]
 
-    fixed_dofs = [dof for n in nodes if n['z'] == 0 for dof in range(n['id'] * 6, n['id'] * 6 + 6)]
+    fixed_dofs = [dof for n in current_nodes if n['z'] == 0 for dof in range(n['id'] * 6, n['id'] * 6 + 6)]
     free_dofs = sorted(list(set(range(num_nodes * 6)) - set(fixed_dofs)))
     
     try:
@@ -330,10 +309,9 @@ def run_analysis(current_elements):
     U_global = np.zeros(num_nodes * 6)
     U_global[free_dofs] = U_free
     
-    # 4. Internal Forces
     for el in current_elements:
-        ni_data = next(n for n in nodes if n['id'] == el['ni'])
-        nj_data = next(n for n in nodes if n['id'] == el['nj'])
+        ni_data = next(n for n in current_nodes if n['id'] == el['ni'])
+        nj_data = next(n for n in current_nodes if n['id'] == el['nj'])
         T_matrix = get_transformation_matrix(ni_data, nj_data)
         
         b, h = map(lambda x: float(x)/1000, el['size'].split('x'))
@@ -377,7 +355,7 @@ def perform_design(elements_to_design):
             el['design_details'] = {
                 'Member ID': el['id'], 'Floor': el['floor'], 'Size (mm)': el['size'],
                 'Mu_max (kN.m)': round(Mu_max, 2), 'Vu_max (kN)': round(Vu_max, 2),
-                'Shear τv (MPa)': round(tau_v, 2), 'Status': 'Pass' if el['pass'] else 'Fail (Resizing...)'
+                'Shear τv (MPa)': round(tau_v, 2), 'Status': 'Pass' if el['pass'] else 'Fail (Resizing/Restructuring...)'
             }
                 
         elif el['type'] == 'Column':
@@ -398,7 +376,7 @@ def perform_design(elements_to_design):
                 'Member ID': el['id'], 'Floor': el['floor'], 'Size (mm)': el['size'],
                 'Orientation': f"{el.get('angle', 0)}°", 'Pu_max (kN)': round(Pu_max, 2),
                 'Req Asc (mm²)': round(max(Asc_calc, 0.008 * Ag), 2),
-                'Status': 'Pass' if el['pass'] else 'Fail (Resizing...)'
+                'Status': 'Pass' if el['pass'] else 'Fail (Resizing/Restructuring...)'
             }
                     
     return elements_to_design, design_status
@@ -420,23 +398,24 @@ def group_elements(elements_list, elem_type):
         return grouped
 
 
+# --- EXECUTION BLOCK ---
 if st.button("Run AI Optimization & Analysis", type="primary", use_container_width=True):
-    with st.spinner("Analyzing Unsymmetric Grid Framing..."):
-        iteration = 1
-        max_iters = 5 if auto_optimize else 1
-        passed = False
-        
+    with st.spinner("Analyzing Grid Framing..."):
         if len(nodes) < 2:
             st.error("Not enough valid nodes generated. Please check your grid definitions.")
             st.stop()
             
+        iteration = 1
+        max_iters = 5 if auto_optimize else 1
+        passed = False
+        
         while iteration <= max_iters:
             try:
-                elements, max_def = run_analysis(elements)
+                elements, max_def = run_analysis(elements, nodes)
                 elements, passed = perform_design(elements)
                 
                 if passed or not auto_optimize:
-                    st.success(f"✅ Analysis Converged in {iteration} Iteration(s). Max Deflection: {max_def * 1000:.2f} mm")
+                    st.success(f"✅ Step 1: Initial Topology Converged in {iteration} Iteration(s). Max Deflection: {max_def * 1000:.2f} mm")
                     break
                 else:
                     for el in elements:
@@ -448,10 +427,66 @@ if st.button("Run AI Optimization & Analysis", type="primary", use_container_wid
                 st.error(f"Solver Error: {e}")
                 st.stop()
                 
-        if not passed and auto_optimize:
-            st.warning("⚠️ Reached max iterations, some elements still overstressed. Review model geometry.")
+        # --- AI RESTRUCTURING LOGIC ---
+        if not passed and allow_ai_restructure:
+            st.warning("⚠️ Standard optimization failed due to over-stressed members (Likely long spans). Initiating AI Structural Restructuring...")
+            
+            new_xy_points = list(xy_points)
+            added_cols = 0
+            
+            for el in elements:
+                if el['type'] == 'Beam' and not el['pass']:
+                    # Heuristic: Break spans longer than 4.5m
+                    if el['length'] > 4.5:
+                        ni = next(n for n in nodes if n['id'] == el['ni'])
+                        nj = next(n for n in nodes if n['id'] == el['nj'])
+                        mid_x = (ni['x'] + nj['x']) / 2.0
+                        mid_y = (ni['y'] + nj['y']) / 2.0
+                        
+                        # Prevent overlapping columns (radius check)
+                        if not any(math.sqrt((p['x']-mid_x)**2 + (p['y']-mid_y)**2) < 1.0 for p in new_xy_points):
+                            new_xy_points.append({'x': mid_x, 'y': mid_y, 'angle': 0.0})
+                            added_cols += 1
+                            
+            if added_cols > 0:
+                st.info(f"🧠 AI identified {added_cols} critically long spans and inserted intermediate support columns. Re-analyzing...")
+                ai_nodes, ai_elements = build_geometry(new_xy_points, z_elevations, num_stories, col_dim, beam_dim)
+                
+                ai_iters = 1
+                while ai_iters <= 3:
+                    ai_elements, max_def = run_analysis(ai_elements, ai_nodes)
+                    ai_elements, passed = perform_design(ai_elements)
+                    if passed:
+                        st.success(f"✅ AI Restructuring Converged! Max Deflection stabilized at {max_def * 1000:.2f} mm")
+                        break
+                    else:
+                        for el in ai_elements:
+                            if not el['pass']:
+                                b, h = map(int, el['size'].split('x'))
+                                el['size'] = f"{b}x{h+50}" if el['type'] == 'Beam' else f"{b+50}x{h+50}"
+                    ai_iters += 1
+                
+                # Render the New AI Viewport
+                render_viewport(ai_nodes, ai_elements, "🤖 AI Restructured Model Viewport", "ai")
+                
+                # OVERRIDE the global nodes and elements with the AI ones for the final BOQ and Reports
+                nodes = ai_nodes
+                elements = ai_elements
+            else:
+                st.info("🧠 AI could not find suitable spans to break without crowding. Final manual engineering review required.")
 
-        # --- SLABS ---
+
+        # --- EXTRACT SPAN DATA FOR SLABS ---
+        max_span_x, max_span_y = 0.1, 0.1
+        for el in elements:
+            if el['type'] == 'Beam':
+                ni = next(n for n in nodes if n['id'] == el['ni'])
+                nj = next(n for n in nodes if n['id'] == el['nj'])
+                span_x = abs(nj['x'] - ni['x'])
+                span_y = abs(nj['y'] - ni['y'])
+                if span_x > max_span_x: max_span_x = span_x
+                if span_y > max_span_y: max_span_y = span_y
+
         slabs = []
         slab_ratio = max_span_y / max_span_x if max_span_x > 0 else 1.0
         slab_type = "One-Way" if slab_ratio > 2.0 else "Two-Way"
