@@ -219,4 +219,51 @@ if st.button("Distribute Loads to Beams", type="primary"):
     with col2:
         st.metric("Internal Y-Beam Load", f"{w_y_beam * 2:.2f} kN/m")
         st.caption("Perimeter: " + f"{w_y_beam:.2f} kN/m")
+    # =========================================================================
+    # PASTE THE NEW CODE HERE:
+    # 4. Construct Global Force Vector (F_global) using Equivalent Nodal Loads
+    # =========================================================================
+    import math
+
+    # 1. Initialize Global Force Vector (6 DOFs per node)
+    num_nodes = len(nodes)
+    F_global = np.zeros(num_nodes * 6)
+
+    # 2. Iterate through elements to apply Equivalent Nodal Loads
+    for el in elements:
+        w = el.get('load_kN_m', 0.0)
+        if el['type'] == 'Beam' and w > 0:
+            
+            # Get node coordinates
+            ni_data = next(n for n in nodes if n['id'] == el['ni'])
+            nj_data = next(n for n in nodes if n['id'] == el['nj'])
+            
+            # Calculate element length (L)
+            dx = nj_data['x'] - ni_data['x']
+            dy = nj_data['y'] - ni_data['y']
+            dz = nj_data['z'] - ni_data['z']
+            L = math.sqrt(dx**2 + dy**2 + dz**2)
+            
+            # Calculate Local Equivalent Nodal Loads (ENL = -FEM)
+            V = (w * L) / 2.0
+            M = (w * L**2) / 12.0
+            
+            # Initialize 12x1 local force vector for the element
+            F_local_ENL = np.zeros(12)
+            F_local_ENL[2] = -V        # Downward shear force Z (Node i)
+            F_local_ENL[4] = -M        # Bending moment Y (Node i)
+            F_local_ENL[8] = -V        # Downward shear force Z (Node j)
+            F_local_ENL[10] = M        # Bending moment Y (Node j)
+            
+            # Placeholder for transformation: P_global = T^T * F_local_ENL
+            P_global = F_local_ENL 
+            
+            # Assemble into Global Force Vector
+            dof_i = el['ni'] * 6
+            dof_j = el['nj'] * 6
+            
+            F_global[dof_i : dof_i + 6] += P_global[0:6]
+            F_global[dof_j : dof_j + 6] += P_global[6:12]
+
+    st.success(f"Successfully assembled Equivalent Nodal Loads into a {len(F_global)}x1 Global Force Vector.")
 
