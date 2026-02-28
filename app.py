@@ -326,3 +326,67 @@ if st.button("Distribute Loads & Assemble Matrices", type="primary"):
             F_global[dof_j : dof_j + 6] += P_global[6:12]
 
     st.success(f"Successfully assigned stiffness matrices and assembled a {len(F_global)}x1 Global Force Vector.")
+    
+    
+    # =========================================================================
+    # 5. Global Assembly, Boundary Conditions, and Solver
+    # =========================================================================
+    
+    # 1. Initialize empty Structure Global Stiffness Matrix (K_global)
+    K_global = np.zeros((num_nodes * 6, num_nodes * 6))
+    
+    # 2. Assemble element matrices into the global matrix
+    for el in elements:
+        k_g = el['k_global']
+        
+        # Calculate the starting index for the DOFs of node i and node j
+        i_dof = el['ni'] * 6
+        j_dof = el['nj'] * 6
+        
+        # Extract the four 6x6 submatrices from the 12x12 element matrix
+        k_ii = k_g[0:6, 0:6]
+        k_ij = k_g[0:6, 6:12]
+        k_ji = k_g[6:12, 0:6]
+        k_jj = k_g[6:12, 6:12]
+        
+        # Add them to the corresponding locations in K_global
+        K_global[i_dof:i_dof+6, i_dof:i_dof+6] += k_ii
+        K_global[i_dof:i_dof+6, j_dof:j_dof+6] += k_ij
+        K_global[j_dof:j_dof+6, i_dof:i_dof+6] += k_ji
+        K_global[j_dof:j_dof+6, j_dof:j_dof+6] += k_jj
+
+    st.success(f"Successfully assembled the {len(K_global)}x{len(K_global)} Structure Global Stiffness Matrix (K).")
+
+    # 3. Apply Boundary Conditions (Fix all base nodes where z == 0)
+    fixed_dofs = []
+    for n in nodes:
+        if n['z'] == 0:
+            base_dof = n['id'] * 6
+            fixed_dofs.extend(range(base_dof, base_dof + 6))
+            
+    # Determine which DOFs are free to move
+    all_dofs = list(range(num_nodes * 6))
+    free_dofs = list(set(all_dofs) - set(fixed_dofs))
+    free_dofs.sort()
+    
+    # 4. Partition the matrices to isolate the free DOFs
+    K_free = K_global[np.ix_(free_dofs, free_dofs)]
+    F_free = F_global[free_dofs]
+    
+    # 5. SOLVE: U = K^-1 * F
+    try:
+        U_free = np.linalg.solve(K_free, F_free)
+        
+        # Reconstruct the full displacement vector U_global
+        U_global = np.zeros(num_nodes * 6)
+        U_global[free_dofs] = U_free
+        
+        st.success("🎉 Solver executed successfully! Nodal displacements calculated.")
+        
+        # Optional: Display maximum displacement for a quick sanity check
+        max_disp_m = np.max(np.abs(U_global))
+        max_disp_mm = max_disp_m * 1000
+        st.info(f"**Maximum Nodal Displacement:** {max_disp_mm:.2f} mm")
+        
+    except np.linalg.LinAlgError:
+        st.error("Solver Failed: The Global Stiffness Matrix is singular. Check geometry and boundary conditions.")
