@@ -50,7 +50,7 @@ if uploaded_file is not None and st.session_state.loaded_file != uploaded_file.n
 
 # --- SIDEBAR: PARAMETRIC INPUTS ---
 st.sidebar.header("1. Floor Elevations")
-floor_data = st.sidebar.data_editor(st.session_state.floors_df, num_rows="dynamic", use_container_width=True)
+floor_data = st.sidebar.data_editor(st.session_state.floors_df, num_rows="dynamic", width="stretch")
 
 z_elevations = {0: 0.0}
 current_z = 0.0
@@ -61,10 +61,10 @@ num_stories = len(floor_data)
 
 st.sidebar.header("2. Structural Grids (From Plan)")
 with st.sidebar.expander("Define X-Grids", expanded=True):
-    x_grid_data = st.data_editor(st.session_state.x_grids_df, num_rows="dynamic", use_container_width=True, key="x_grids")
+    x_grid_data = st.data_editor(st.session_state.x_grids_df, num_rows="dynamic", width="stretch", key="x_grids")
 
 with st.sidebar.expander("Define Y-Grids", expanded=True):
-    y_grid_data = st.data_editor(st.session_state.y_grids_df, num_rows="dynamic", use_container_width=True, key="y_grids")
+    y_grid_data = st.data_editor(st.session_state.y_grids_df, num_rows="dynamic", width="stretch", key="y_grids")
 
 st.sidebar.header("3. Column Placement")
 x_map = {str(row['Grid_ID']).strip(): float(row['X_Coord (m)']) for _, row in x_grid_data.iterrows() if pd.notna(row['Grid_ID'])}
@@ -77,7 +77,7 @@ with st.sidebar.expander("Column Locations & Orientations", expanded=True):
         "* **Offsets:** Shift the column from the exact grid intersection (in meters).\n"
         "* **Angle:** `0` aligns the column's depth (D) along the X-axis. `90` rotates it to the Y-axis."
     )
-    col_data = st.data_editor(st.session_state.cols_df, num_rows="dynamic", use_container_width=True)
+    col_data = st.data_editor(st.session_state.cols_df, num_rows="dynamic", width="stretch")
 
 st.sidebar.header("4. IS Code Design & Load Parameters")
 col_dim = st.sidebar.text_input("Init Column Size (mm)", str(st.session_state.params["col_dim"]))
@@ -122,7 +122,7 @@ st.sidebar.download_button(
     data=export_project_data(),
     file_name="structural_project_data.json",
     mime="application/json",
-    use_container_width=True
+    width="stretch"
 )
 
 def safe_float(val, default=0.0):
@@ -245,7 +245,7 @@ def render_viewport(view_nodes, view_elements, title="Structural Model Viewport"
 
     axis_config = dict(showbackground=show_axis, showgrid=show_axis, zeroline=show_axis, showticklabels=show_axis)
     fig.update_layout(scene=dict(xaxis=dict(**axis_config, title='X' if show_axis else ''), yaxis=dict(**axis_config, title='Y' if show_axis else ''), zaxis=dict(**axis_config, title='Z' if show_axis else ''), aspectmode='data'), margin=dict(l=0, r=0, b=0, t=0), height=500)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 render_viewport(nodes, elements, "Initial User Model", "init")
 
@@ -403,7 +403,7 @@ def group_elements(elements_list, elem_type):
         return grouped
 
 # --- EXECUTION BLOCK ---
-if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_container_width=True):
+if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stretch"):
     with st.spinner("Analyzing Frame & Designing Slabs..."):
         if len(nodes) < 2:
             st.error("Not enough valid nodes generated. Please check your grid definitions.")
@@ -803,7 +803,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                 materials.append({"Floor": f"Level {z}", "Concrete (m³)": round(conc_vol, 2), "Steel (kg)": round(steel_wt, 2)})
                 
         colA, colB = st.columns(2)
-        colA.dataframe(pd.DataFrame(materials), use_container_width=True)
+        colA.dataframe(pd.DataFrame(materials), width="stretch")
         colB.metric("Total Concrete Volume", f"{total_conc:.2f} m³")
         colB.metric("Total Rebar Weight", f"{total_steel / 1000:.2f} MT")
 
@@ -812,19 +812,19 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
         
         col_grp1, col_grp2 = st.columns(2)
         col_grp1.subheader("Beam Groups")
-        col_grp1.dataframe(group_elements(elements, 'Beam'), use_container_width=True)
+        col_grp1.dataframe(group_elements(elements, 'Beam'), width="stretch")
         col_grp2.subheader("Column Groups")
-        col_grp2.dataframe(group_elements(elements, 'Column'), use_container_width=True)
+        col_grp2.dataframe(group_elements(elements, 'Column'), width="stretch")
 
         tab1, tab2, tab3, tab4 = st.tabs(["Slabs", "Beams", "Columns", "Footings"])
-        tab1.dataframe(pd.DataFrame(slabs), use_container_width=True)
+        tab1.dataframe(pd.DataFrame(slabs), width="stretch")
         
         beam_df = pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Beam'])
-        tab2.dataframe(beam_df, use_container_width=True)
+        tab2.dataframe(beam_df, width="stretch")
         
         col_df = pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column'])
-        tab3.dataframe(col_df, use_container_width=True)
-        tab4.dataframe(pd.DataFrame(footings), use_container_width=True)
+        tab3.dataframe(col_df, width="stretch")
+        tab4.dataframe(pd.DataFrame(footings), width="stretch")
 
         # --- 7. FOUNDATION ECONOMICS ---
         st.divider()
@@ -864,4 +864,4 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
             st.info("💡 Recommendation: Standard Pad/Combined footings are more economical.")
             
         with st.expander("View Dynamic Pile Lengths per Column"): 
-            st.dataframe(pd.DataFrame(pile_details), use_container_width=True)
+            st.dataframe(pd.DataFrame(pile_details), width="stretch")
