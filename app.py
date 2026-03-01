@@ -160,7 +160,8 @@ def build_geometry(primary_pts, secondary_pts, z_dict, n_stories, c_dim, b_dim):
                 gen_elements.append({'id': eid, 'ni': bn['id'], 'nj': tn['id'], 'type': 'Column', 'floor': z, 'size': c_dim, 'angle': bn['angle']})
                 eid += 1
                 
-    tolerance = 0.5 
+    # STRICT TOLERANCE to handle close architectural grids safely (e.g. 115mm gaps)
+    tolerance = 0.05 
     for z in range(1, n_stories + 1):
         floor_nodes = [n for n in gen_nodes if n['floor'] == z]
         
