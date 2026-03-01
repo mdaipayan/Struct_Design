@@ -516,6 +516,110 @@ if st.button("Run Full Analysis & Deep AI Optimization", type="primary", width="
         except Exception as e:
             st.error(f"Manual Model Failed: {e}")
             st.stop()
+             except Exception as e:
+            st.error(f"Manual design failed: {e}")
+            st.stop()
+
+        # 3. RUN OPTIMIZED DESIGN CHECK
+        try:
+            optimized_elements = copy.deepcopy(elements)
+            optimized_elements, U_opt = run_analysis_dynamic(
+                optimized_elements, nodes, opt_slab_thickness
+            )
+            optimized_elements, opt_passed = perform_design(
+                optimized_elements, U_opt, nodes, z_elevations
+            )
+        except Exception as e:
+            st.error(f"Optimized design failed: {e}")
+            st.stop()
+
+        # ---------------------------------------------------
+        # RESULTS DISPLAY
+        # ---------------------------------------------------
+
+        st.success("✅ Analysis Completed Successfully")
+
+        col1, col2 = st.columns(2)
+
+        # ---------- SLAB RESULT ----------
+        with col1:
+            st.subheader("Manual Slab Check (IS 456)")
+            st.write(f"Behavior : **{slab_behavior} Slab**")
+            st.write(f"Thickness Provided : **{slab_thickness} mm**")
+            st.write(f"Status : **{man_slab_status}**")
+
+        with col2:
+            st.subheader("AI Optimized Slab")
+            st.write(f"Optimized Thickness : **{opt_slab_thickness} mm**")
+            st.write(
+                "Status : ✅ Safe"
+                if opt_passed
+                else "❌ Needs Further Optimization"
+            )
+
+        # ---------- DESIGN TABLES ----------
+        beam_results = [
+            el["design_details"]
+            for el in optimized_elements
+            if el["type"] == "Beam"
+        ]
+
+        column_results = [
+            el["design_details"]
+            for el in optimized_elements
+            if el["type"] == "Column"
+        ]
+
+        st.subheader("Beam Design Results (IS 456)")
+        if beam_results:
+            st.dataframe(pd.DataFrame(beam_results), use_container_width=True)
+
+        st.subheader("Column Design Results (IS 456)")
+        if column_results:
+            st.dataframe(pd.DataFrame(column_results), use_container_width=True)
+
+        # ---------- BOQ ----------
+        X_coords = [n["x"] for n in nodes]
+        Y_coords = [n["y"] for n in nodes]
+        area = (
+            (max(X_coords) - min(X_coords))
+            * (max(Y_coords) - min(Y_coords))
+            * 0.85
+        )
+
+        conc, steel = get_boq(
+            optimized_elements,
+            opt_slab_thickness,
+            area,
+        )
+
+        st.subheader("📊 Quantity Takeoff (BOQ)")
+
+        boq_df = pd.DataFrame(
+            {
+                "Item": ["Concrete Volume", "Steel Weight"],
+                "Quantity": [round(conc, 2), round(steel / 1000, 2)],
+                "Unit": ["m³", "Tonnes"],
+            }
+        )
+
+        st.table(boq_df)
+
+        # ---------- DEFORMED SHAPE ----------
+        scale = 50
+        deformed_nodes = copy.deepcopy(nodes)
+
+        for n in deformed_nodes:
+            n["x"] += U_opt[n["id"] * 6] * scale
+            n["y"] += U_opt[n["id"] * 6 + 1] * scale
+            n["z"] += U_opt[n["id"] * 6 + 2] * scale
+
+        render_viewport(
+            deformed_nodes,
+            optimized_elements,
+            "Deformed Shape (Scaled View)",
+            "def",
+        )
             
         # 3. RUN AI OPTIMIZATION LOOP
         ai_elements = copy.deepcopy(elements)
