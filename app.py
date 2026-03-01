@@ -64,9 +64,11 @@ allow_ai_restructure = st.sidebar.checkbox("Allow AI Restructuring (Add Beams/Co
 
 def safe_float(val, default=0.0):
     try:
-        if pd.isna(val) or val is None or str(val).strip() == "": return default
+        if pd.isna(val) or val is None or str(val).strip() == "": 
+            return default
         return float(val)
-    except (ValueError, TypeError): return default
+    except (ValueError, TypeError): 
+        return default
 
 # --- GEOMETRY GENERATOR FUNCTION ---
 def build_geometry(primary_pts, secondary_pts, z_dict, n_stories, c_dim, b_dim):
@@ -74,12 +76,14 @@ def build_geometry(primary_pts, secondary_pts, z_dict, n_stories, c_dim, b_dim):
     gen_elements = []
     nid = 0
     
+    # Primary Nodes (Columns)
     for floor_idx in range(n_stories + 1):
         z_val = z_dict.get(floor_idx, 0.0)
         for pt in primary_pts:
             gen_nodes.append({'id': nid, 'x': pt['x'], 'y': pt['y'], 'z': z_val, 'floor': floor_idx, 'angle': pt.get('angle', 0), 'is_primary': True})
             nid += 1
             
+    # Secondary Nodes (Mid-span beams)
     for floor_idx in range(1, n_stories + 1):
         z_val = z_dict.get(floor_idx, 0.0)
         for pt in secondary_pts:
@@ -87,6 +91,7 @@ def build_geometry(primary_pts, secondary_pts, z_dict, n_stories, c_dim, b_dim):
                 gen_nodes.append({'id': nid, 'x': pt['x'], 'y': pt['y'], 'z': z_val, 'floor': floor_idx, 'angle': 0, 'is_primary': False})
                 nid += 1
 
+    # Vertical Elements (Columns)
     eid = 0
     for z in range(n_stories):
         bottom_nodes = [n for n in gen_nodes if n['floor'] == z and n.get('is_primary', True)]
@@ -97,17 +102,22 @@ def build_geometry(primary_pts, secondary_pts, z_dict, n_stories, c_dim, b_dim):
                 gen_elements.append({'id': eid, 'ni': bn['id'], 'nj': tn['id'], 'type': 'Column', 'floor': z, 'size': c_dim, 'angle': bn['angle']})
                 eid += 1
                 
+    # Horizontal Elements (Beams)
     tolerance = 0.5 
     for z in range(1, n_stories + 1):
         floor_nodes = [n for n in gen_nodes if n['floor'] == z]
         
+        # X-Direction Beams (grouped by Y)
         y_groups = {}
         for n in floor_nodes:
             matched = False
             for y_key in y_groups.keys():
                 if abs(n['y'] - y_key) <= tolerance:
-                    y_groups[y_key].append(n); matched = True; break
-            if not matched: y_groups[n['y']] = [n]
+                    y_groups[y_key].append(n)
+                    matched = True
+                    break
+            if not matched: 
+                y_groups[n['y']] = [n]
                 
         for y_key, group in y_groups.items():
             group = sorted(group, key=lambda k: k['x'])
@@ -115,13 +125,17 @@ def build_geometry(primary_pts, secondary_pts, z_dict, n_stories, c_dim, b_dim):
                 gen_elements.append({'id': eid, 'ni': group[i]['id'], 'nj': group[i+1]['id'], 'type': 'Beam', 'floor': z, 'size': b_dim, 'angle': 0})
                 eid += 1
                 
+        # Y-Direction Beams (grouped by X)
         x_groups = {}
         for n in floor_nodes:
             matched = False
             for x_key in x_groups.keys():
                 if abs(n['x'] - x_key) <= tolerance:
-                    x_groups[x_key].append(n); matched = True; break
-            if not matched: x_groups[n['x']] = [n]
+                    x_groups[x_key].append(n)
+                    matched = True
+                    break
+            if not matched: 
+                x_groups[n['x']] = [n]
                 
         for x_key, group in x_groups.items():
             group = sorted(group, key=lambda k: k['y'])
@@ -131,6 +145,7 @@ def build_geometry(primary_pts, secondary_pts, z_dict, n_stories, c_dim, b_dim):
                 
     return gen_nodes, gen_elements
 
+# Extract geometry points
 primary_xy = []
 for idx, row in col_data.iterrows():
     xg = str(row.get('X_Grid', '')).strip()
@@ -157,6 +172,7 @@ def render_viewport(view_nodes, view_elements, title="Structural Model Viewport"
         nj = next(n for n in view_nodes if n['id'] == el['nj'])
         
         is_secondary = not (ni.get('is_primary', True) and nj.get('is_primary', True))
+        
         if el['type'] == 'Column': color = 'blue'
         elif is_secondary: color = '#2ca02c' 
         else: color = 'red'
@@ -168,7 +184,9 @@ def render_viewport(view_nodes, view_elements, title="Structural Model Viewport"
         ))
 
     if show_arch_grids and x_map and y_map:
-        min_x, max_x, min_y, max_y = min(x_map.values()), max(x_map.values()), min(y_map.values()), max(y_map.values())
+        min_x, max_x = min(x_map.values()), max(x_map.values())
+        min_y, max_y = min(y_map.values()), max(y_map.values())
+        
         for grid_id, y_val in y_map.items():
             fig.add_trace(go.Scatter3d(x=[min_x-1, max_x+1], y=[y_val, y_val], z=[0, 0], mode='lines+text', line=dict(color='gray', width=2, dash='dash'), text=[f"Grid {grid_id}", ''], textposition='middle left', hoverinfo='none', showlegend=False))
         for grid_id, x_val in x_map.items():
@@ -177,6 +195,7 @@ def render_viewport(view_nodes, view_elements, title="Structural Model Viewport"
     x_coords = [n['x'] for n in view_nodes]
     y_coords = [n['y'] for n in view_nodes]
     z_coords = [n['z'] for n in view_nodes]
+    
     fig.add_trace(go.Scatter3d(x=x_coords, y=y_coords, z=z_coords, mode='markers', marker=dict(size=3, color='black'), hoverinfo='text', text=[f"Node: {n['id']}" for n in view_nodes], showlegend=False))
 
     axis_config = dict(showbackground=show_axis, showgrid=show_axis, zeroline=show_axis, showticklabels=show_axis)
@@ -190,30 +209,57 @@ def get_transformation_matrix(ni, nj):
     dx, dy, dz = nj['x'] - ni['x'], nj['y'] - ni['y'], nj['z'] - ni['z']
     L = math.sqrt(dx**2 + dy**2 + dz**2)
     cx, cy, cz = dx/L, dy/L, dz/L
-    lam = np.zeros((3, 3))
-    if abs(cx) < 1e-6 and abs(cy) < 1e-6: lam = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]]) if cz > 0 else np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])
+    
+    if abs(cx) < 1e-6 and abs(cy) < 1e-6: 
+        # Vertical Member
+        lam = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]]) if cz > 0 else np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])
     else: 
         D = math.sqrt(cx**2 + cy**2)
-        lam = np.array([[cx, cy, cz], [-cx*cz/D, -cy*cz/D, D], [-cy/D, cx/D, 0]])
+        lam = np.array([
+            [cx, cy, cz], 
+            [-cx*cz/D, -cy*cz/D, D], 
+            [cy/D, -cx/D, 0]
+        ])
+        
     T = np.zeros((12, 12))
-    for i in range(4): T[i*3:(i+1)*3, i*3:(i+1)*3] = lam
+    for i in range(4): 
+        T[i*3:(i+1)*3, i*3:(i+1)*3] = lam
     return T
 
 def get_local_stiffness(E, G, A, Iy, Iz, J, L):
     k = np.zeros((12, 12))
-    k[0,0]=k[6,6]= E*A/L; k[0,6]=k[6,0]= -E*A/L
-    k[3,3]=k[9,9]= G*J/L; k[3,9]=k[9,3]= -G*J/L
-    k[2,2]=k[8,8]= 12*E*Iy/L**3; k[2,8]=k[8,2]= -12*E*Iy/L**3
-    k[4,4]=k[10,10]= 4*E*Iy/L; k[4,10]=k[10,4]= 2*E*Iy/L
-    k[2,4]=k[2,10]=k[4,2]=k[10,2]= -6*E*Iy/L**2; k[8,4]=k[8,10]=k[4,8]=k[10,8]= 6*E*Iy/L**2
-    k[1,1]=k[7,7]= 12*E*Iz/L**3; k[1,7]=k[7,1]= -12*E*Iz/L**3
-    k[5,5]=k[11,11]= 4*E*Iz/L; k[5,11]=k[11,5]= 2*E*Iz/L
-    k[1,5]=k[1,11]=k[5,1]=k[11,1]= 6*E*Iz/L**2; k[7,5]=k[7,11]=k[5,7]=k[11,7]= -6*E*Iz/L**2
+    
+    # Axial
+    k[0, 0] = k[6, 6] = E * A / L
+    k[0, 6] = k[6, 0] = -E * A / L
+    
+    # Torsion
+    k[3, 3] = k[9, 9] = G * J / L
+    k[3, 9] = k[9, 3] = -G * J / L
+    
+    # Bending about Local Y
+    k[2, 2] = k[8, 8] = 12 * E * Iy / L**3
+    k[2, 8] = k[8, 2] = -12 * E * Iy / L**3
+    k[4, 4] = k[10, 10] = 4 * E * Iy / L
+    k[4, 10] = k[10, 4] = 2 * E * Iy / L
+    k[2, 4] = k[2, 10] = k[4, 2] = k[10, 2] = -6 * E * Iy / L**2
+    k[8, 4] = k[8, 10] = k[4, 8] = k[10, 8] = 6 * E * Iy / L**2
+    
+    # Bending about Local Z
+    k[1, 1] = k[7, 7] = 12 * E * Iz / L**3
+    k[1, 7] = k[7, 1] = -12 * E * Iz / L**3
+    k[5, 5] = k[11, 11] = 4 * E * Iz / L
+    k[5, 11] = k[11, 5] = 2 * E * Iz / L
+    k[1, 5] = k[1, 11] = k[5, 1] = k[11, 1] = 6 * E * Iz / L**2
+    k[7, 5] = k[7, 11] = k[5, 7] = k[11, 7] = -6 * E * Iz / L**2
+    
     return k
 
 def run_analysis(current_elements, current_nodes):
     num_nodes = len(current_nodes)
-    if num_nodes == 0: return current_elements, 0.0
+    if num_nodes == 0: 
+        return current_elements, 0.0
+        
     F_global = np.zeros(num_nodes * 6)
     E_conc = 5000 * math.sqrt(fck) * 1e3
     G_conc = E_conc / 2.4 
@@ -277,8 +323,13 @@ def run_analysis(current_elements, current_nodes):
         b, h = map(lambda x: float(x)/1000, el['size'].split('x'))
         if el.get('angle', 0) == 90: b, h = h, b 
             
-        A_sec, Iy_sec, Iz_sec = b * h, (b * h**3) / 12.0, (h * b**3) / 12.0
-        J_sec = (b**3 * h) * (1/3 - 0.21*(b/h)*(1 - (b**4)/(12*h**4)))
+        A_sec = b * h
+        Iy_sec = (b * h**3) / 12.0
+        Iz_sec = (h * b**3) / 12.0
+        
+        # Flaw Fix: Torsional Constant requires min and max dimensions
+        dim_min, dim_max = min(b, h), max(b, h)
+        J_sec = (dim_min**3 * dim_max) * (1/3 - 0.21 * (dim_min/dim_max) * (1 - (dim_min**4) / (12 * dim_max**4)))
 
         T_matrix = get_transformation_matrix(ni_data, nj_data)
         k_local = get_local_stiffness(E_conc, G_conc, A_sec, Iy_sec, Iz_sec, J_sec, L)
@@ -286,12 +337,17 @@ def run_analysis(current_elements, current_nodes):
 
         w = el.get('load_kN_m', 0.0)
         if el['type'] == 'Beam' and w > 0:
+            # Flaw Fix: FEM vector alignment with Vertical Y-axis
             V, M = (w * L) / 2.0, (w * L**2) / 12.0
             F_local_ENL = np.zeros(12)
-            F_local_ENL[2], F_local_ENL[4], F_local_ENL[8], F_local_ENL[10] = -V, -M, -V, M
+            F_local_ENL[1] = V     # Shear left
+            F_local_ENL[5] = M     # Moment left
+            F_local_ENL[7] = V     # Shear right
+            F_local_ENL[11] = -M   # Moment right
+            
             P_global = np.dot(T_matrix.T, F_local_ENL)
-            F_global[el['ni']*6 : el['ni']*6+6] += P_global[0:6]
-            F_global[el['nj']*6 : el['nj']*6+6] += P_global[6:12]
+            F_global[el['ni']*6 : el['ni']*6+6] -= P_global[0:6]
+            F_global[el['nj']*6 : el['nj']*6+6] -= P_global[6:12]
 
     K_global = np.zeros((num_nodes * 6, num_nodes * 6))
     for el in current_elements:
@@ -321,14 +377,17 @@ def run_analysis(current_elements, current_nodes):
         b, h = map(lambda x: float(x)/1000, el['size'].split('x'))
         if el.get('angle', 0) == 90: b, h = h, b 
             
-        k_local = get_local_stiffness(E_conc, G_conc, b*h, (b*h**3)/12.0, (h*b**3)/12.0, (b**3 * h) * (1/3 - 0.21*(b/h)*(1 - (b**4)/(12*h**4))), el['length'])
+        dim_min, dim_max = min(b, h), max(b, h)
+        J_sec = (dim_min**3 * dim_max) * (1/3 - 0.21 * (dim_min/dim_max) * (1 - (dim_min**4) / (12 * dim_max**4)))
+            
+        k_local = get_local_stiffness(E_conc, G_conc, b*h, (b*h**3)/12.0, (h*b**3)/12.0, J_sec, el['length'])
         u_local = np.dot(T_matrix, np.concatenate((U_global[el['ni']*6:el['ni']*6+6], U_global[el['nj']*6:el['nj']*6+6])))
         
         F_local_ENL = np.zeros(12)
         w = el.get('load_kN_m', 0.0)
         if el['type'] == 'Beam' and w > 0:
             V, M = (w * el['length']) / 2.0, (w * el['length']**2) / 12.0
-            F_local_ENL[2], F_local_ENL[4], F_local_ENL[8], F_local_ENL[10] = -V, -M, -V, M
+            F_local_ENL[1], F_local_ENL[5], F_local_ENL[7], F_local_ENL[11] = V, M, V, -M
             
         el['F_internal'] = np.dot(k_local, u_local) - F_local_ENL
 
@@ -409,7 +468,6 @@ def group_elements(elements_list, elem_type):
         grouped['Group ID'] = [f"B{i+1}" for i in range(len(grouped))]
         return grouped
 
-
 # --- EXECUTION BLOCK ---
 if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_container_width=True):
     with st.spinner("Analyzing Frame..."):
@@ -489,25 +547,22 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                     ai_iters += 1
                 
                 if not passed_phase2:
-                    # Capture the failed Phase 2 state so Phase 3 can read it
                     nodes, elements = ai_nodes, ai_elements
             else:
                 passed_phase2 = False 
 
-        # --- PHASE 3: DEEP RESTRUCTURING (COLUMNS TO FOUNDATION) ---
+        # --- PHASE 3: DEEP RESTRUCTURING ---
         if not passed_phase1 and not passed_phase2 and allow_ai_restructure:
-            st.error("⚠️ Phase 2 Secondary Beams failed (overstressed supports). Phase 3: Deep Restructuring (Adding Primary Columns)...")
+            st.error("⚠️ Phase 2 Secondary Beams failed. Phase 3: Deep Restructuring (Adding Primary Columns)...")
             
             hard_primary_xy = list(primary_xy)
             added_cols = 0
             
-            # Upgrade secondary nodes to full primary columns
             for pt in secondary_xy:
                 if not any(math.sqrt((p['x']-pt['x'])**2 + (p['y']-pt['y'])**2) < 1.0 for p in hard_primary_xy):
                     hard_primary_xy.append({'x': pt['x'], 'y': pt['y'], 'angle': 0.0})
                     added_cols += 1
 
-            # Also check for any other hopelessly failing long spans
             for el in elements:
                 if el['type'] == 'Beam' and not el['pass'] and el['length'] > 4.0:
                     ni = next(n for n in nodes if n['id'] == el['ni'])
@@ -543,7 +598,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                     hard_iters += 1
                 
                 nodes, elements = hard_nodes, hard_elements
-                render_viewport(nodes, elements, "🏗️ Phase 3 Deep Restructured Model (New Columns added)", "hard")
+                render_viewport(nodes, elements, "🏗️ Phase 3 Deep Restructured Model", "hard")
             else:
                 st.info("🧠 AI could not safely inject columns without severe crowding. Manual layout review required.")
 
@@ -603,7 +658,8 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
         
         for z in range(num_stories + 1):
             conc_vol, steel_wt = 0, 0
-            for el in [el for el in elements if el['floor'] == z]:
+            floor_elements = [e for e in elements if e['floor'] == z]
+            for el in floor_elements:
                 b, h = map(lambda x: float(x)/1000, el['size'].split('x'))
                 vol = b * h * el['length']
                 conc_vol += vol
@@ -612,8 +668,10 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
             slab_vol = approx_floor_area * (slab_thickness/1000) if z > 0 else 0
             conc_vol += slab_vol
             steel_wt += slab_vol * 7850 * 0.008
-            total_conc += conc_vol; total_steel += steel_wt
-            if conc_vol > 0: materials.append({"Floor": f"Level {z}", "Concrete (m³)": round(conc_vol, 2), "Steel (kg)": round(steel_wt, 2)})
+            total_conc += conc_vol
+            total_steel += steel_wt
+            if conc_vol > 0: 
+                materials.append({"Floor": f"Level {z}", "Concrete (m³)": round(conc_vol, 2), "Steel (kg)": round(steel_wt, 2)})
                 
         colA, colB = st.columns(2)
         colA.dataframe(pd.DataFrame(materials), use_container_width=True)
@@ -667,6 +725,10 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
         st.write(f"**Pad/Combined Foundation Est.:** ₹ {cost_pad:,.2f} (Vol: {vol_pad_total:.1f} m³)")
         st.write(f"**Under-Reamed Pile Foundation Est.:** ₹ {cost_pile:,.2f} (Vol: {vol_pile_total:.1f} m³)")
 
-        if cost_pile < cost_pad: st.success("💡 Recommendation: Under-Reamed Piles are more economical.")
-        else: st.info("💡 Recommendation: Standard Pad/Combined footings are more economical.")
-        with st.expander("View Dynamic Pile Lengths per Column"): st.dataframe(pd.DataFrame(pile_details), use_container_width=True)
+        if cost_pile < cost_pad: 
+            st.success("💡 Recommendation: Under-Reamed Piles are more economical.")
+        else: 
+            st.info("💡 Recommendation: Standard Pad/Combined footings are more economical.")
+            
+        with st.expander("View Dynamic Pile Lengths per Column"): 
+            st.dataframe(pd.DataFrame(pile_details), use_container_width=True)
