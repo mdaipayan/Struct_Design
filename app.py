@@ -8,7 +8,7 @@ import json
 # --- PAGE SETUP ---
 st.set_page_config(page_title="IS Code Compliant 3D Frame Designer", layout="wide")
 st.title("🏢 3D Building Frame Analysis & IS-Code Auto-Design")
-st.caption("Strict Compliance: IS 456:2000, IS 875 (Part 1 & 2), IS 1893 (Part 1)")
+st.caption("Strict Compliance: IS 456 (Flexure, Shear, Deflection), IS 875, IS 1893 (Storey Drift)")
 
 # --- STATE INITIALIZATION (REQUIRED FOR FILE UPLOAD) ---
 if 'init_done' not in st.session_state:
@@ -23,7 +23,7 @@ if 'init_done' not in st.session_state:
     st.session_state.params = {
         "col_dim": "230x450", "beam_dim": "230x400", "fck": 25.0, "fy": 500.0, 
         "sbc": 200.0, "live_load": 2.0, "floor_finish": 1.5, "wall_thickness": 230,
-        "slab_thickness": 150, "lateral_coeff": 0.05
+        "slab_thickness": 150, "lateral_coeff": 0.025
     }
     st.session_state.loaded_file = None
     st.session_state.init_done = True
@@ -44,7 +44,7 @@ if uploaded_file is not None and st.session_state.loaded_file != uploaded_file.n
             st.session_state.params[k] = v
             
         st.session_state.loaded_file = uploaded_file.name
-        st.rerun() # Refresh the UI with the loaded data
+        st.rerun() 
     except Exception as e:
         st.sidebar.error(f"Invalid JSON file: {e}")
 
@@ -80,8 +80,8 @@ with st.sidebar.expander("Column Locations & Orientations", expanded=True):
     col_data = st.data_editor(st.session_state.cols_df, num_rows="dynamic", use_container_width=True)
 
 st.sidebar.header("4. IS Code Design & Load Parameters")
-col_dim = st.sidebar.text_input("Init Column Size (mm)", st.session_state.params["col_dim"])
-beam_dim = st.sidebar.text_input("Init Beam Size (mm)", st.session_state.params["beam_dim"])
+col_dim = st.sidebar.text_input("Init Column Size (mm)", str(st.session_state.params["col_dim"]))
+beam_dim = st.sidebar.text_input("Init Beam Size (mm)", str(st.session_state.params["beam_dim"]))
 
 col3, col4 = st.sidebar.columns(2)
 fck = col3.number_input("fck (MPa)", value=float(st.session_state.params["fck"]), step=5.0)
@@ -276,11 +276,33 @@ def get_local_stiffness(E, G, A, Iy, Iz, J, L):
     return k
 
 # --- ENHANCED: DEEP CHECK AI OPTIMIZATION ---
-def perform_design(elements_to_design):
+def perform_design(elements_to_design, U_global, current_nodes, z_elevations):
     design_status = True
     mulim_coeff = 0.133 if fy >= 500 else 0.138 
     tau_c_max = 0.62 * math.sqrt(fck) 
     
+    # Calculate Global Storey Drifts for Seismic Check (IS 1893)
+    floor_drifts = {}
+    for z in range(1, num_stories + 1):
+        nodes_z = [n for n in current_nodes if n['floor'] == z]
+        nodes_prev = [n for n in current_nodes if n['floor'] == z - 1]
+        
+        max_x_z = max([abs(U_global[n['id']*6]) for n in nodes_z]) if nodes_z else 0
+        max_x_prev = max([abs(U_global[n['id']*6]) for n in nodes_prev]) if nodes_prev else 0
+        
+        max_y_z = max([abs(U_global[n['id']*6 + 1]) for n in nodes_z]) if nodes_z else 0
+        max_y_prev = max([abs(U_global[n['id']*6 + 1]) for n in nodes_prev]) if nodes_prev else 0
+        
+        drift_x = abs(max_x_z - max_x_prev)
+        drift_y = abs(max_y_z - max_y_prev)
+        h_story = z_elevations.get(z, 3.0) - z_elevations.get(z-1, 0.0)
+        
+        # IS 1893 Limit: 0.004 * storey height
+        if max(drift_x, drift_y) > (0.004 * h_story):
+            floor_drifts[z] = True
+        else:
+            floor_drifts[z] = False
+            
     for el in elements_to_design:
         b, h = map(lambda x: float(x), el['size'].split('x'))
         if el.get('angle', 0) == 90: b, h = h, b 
@@ -301,10 +323,21 @@ def perform_design(elements_to_design):
             Mu_lim = mulim_coeff * fck * b * (d_beam**2) / 1e6
             tau_v = (Vu_max * 1000) / (b * d_beam)
             
+            # --- BEAM DEFLECTION CHECK (L/250) ---
+            L_mm = el['length'] * 1000
+            w_load = el.get('load_kN_m', 0.0)
+            delta_ss = (5 * w_load * 1000 * (el['length']**4)) / (384 * el['E'] * el['Iz']) * 1000 if (el.get('E',0)*el.get('Iz',0)) != 0 else 0
+            
+            theta_1, theta_2 = el.get('u_local', np.zeros(12))[5], el.get('u_local', np.zeros(12))[11]
+            delta_rot = abs((L_mm / 8) * (theta_1 - theta_2))
+            max_deflection = delta_ss + delta_rot
+            
+            if max_deflection > (L_mm / 250):
+                el['failure_mode'] += "deflection "
             if Mu_max > Mu_lim:
                 el['failure_mode'] += "flexure "
             if tau_v > tau_c_max:
-                el['failure_mode'] += "shear"
+                el['failure_mode'] += "shear "
                 
             if el['failure_mode']:
                 el['pass'] = False
@@ -313,7 +346,8 @@ def perform_design(elements_to_design):
             el['design_details'] = {
                 'Member ID': el['id'], 'Floor': el['floor'], 'Size (mm)': el['size'],
                 'Mu_max (kN.m)': round(Mu_max, 2), 'Vu_max (kN)': round(Vu_max, 2),
-                'Shear τv (MPa)': round(tau_v, 2), 'Status': 'Safe' if el['pass'] else el['failure_mode'].strip()
+                'Shear τv (MPa)': round(tau_v, 2), 'Deflect (mm)': round(max_deflection, 2), 
+                'Status': 'Safe' if el['pass'] else el['failure_mode'].strip()
             }
                 
         elif el['type'] == 'Column':
@@ -330,12 +364,16 @@ def perform_design(elements_to_design):
             Asc_req_mom = (Mu_max * 1e6) / (0.87 * fy * 0.8 * d_col) if Mu_max > 0 else 0
             Asc_calc = Asc_req_axial + Asc_req_mom
             
+            if floor_drifts.get(el['floor'], False):
+                el['failure_mode'] += "drift "
+                el['pass'] = False
+                design_status = False
             if Pu > Pu_crushing_limit:
-                el['failure_mode'] = "axial_crushing"
+                el['failure_mode'] += "axial_crushing "
                 el['pass'] = False
                 design_status = False
             elif Asc_calc > 0.04 * Ag: 
-                el['failure_mode'] = "steel_limit"
+                el['failure_mode'] += "steel_limit "
                 el['pass'] = False
                 design_status = False
                     
@@ -343,7 +381,7 @@ def perform_design(elements_to_design):
                 'Member ID': el['id'], 'Floor': el['floor'], 'Size (mm)': el['size'],
                 'Orientation': f"{el.get('angle', 0)}°", 'Pu_max (kN)': round(Pu, 2), 'Mu_max (kN.m)': round(Mu_max, 2),
                 'Req Asc (mm²)': round(max(Asc_calc, 0.008 * Ag), 2),
-                'Status': 'Safe' if el['pass'] else el['failure_mode']
+                'Status': 'Safe' if el['pass'] else el['failure_mode'].strip()
             }
                     
     return elements_to_design, design_status
@@ -359,7 +397,7 @@ def group_elements(elements_list, elem_type):
         return grouped
     elif elem_type == 'Beam':
         grouped = df.groupby(['Floor', 'Size (mm)']).agg(
-            Max_Mu=('Mu_max (kN.m)', 'max'), Max_Vu=('Vu_max (kN)', 'max'), Member_Count=('Member ID', 'count')
+            Max_Mu=('Mu_max (kN.m)', 'max'), Max_Vu=('Vu_max (kN)', 'max'), Max_Deflect=('Deflect (mm)', 'max'), Member_Count=('Member ID', 'count')
         ).reset_index()
         grouped['Group ID'] = [f"B{i+1}" for i in range(len(grouped))]
         return grouped
@@ -418,7 +456,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
 
         def run_analysis_dynamic(current_elements, current_nodes, optimized_slab_D):
             num_nodes = len(current_nodes)
-            if num_nodes == 0: return current_elements, 0.0
+            if num_nodes == 0: return current_elements, np.zeros(0)
             
             F_global = np.zeros(num_nodes * 6)
             E_conc = 5000 * math.sqrt(fck) * 1e3
@@ -486,6 +524,10 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                 dim_min, dim_max = min(b, h), max(b, h)
                 J_sec = (dim_min**3 * dim_max) * (1/3 - 0.21 * (dim_min/dim_max) * (1 - (dim_min**4) / (12 * dim_max**4)))
 
+                # Store stiffness parameters for deflection checks
+                el['E'] = E_conc
+                el['Iz'] = Iz_sec
+
                 T_matrix = get_transformation_matrix(ni_data, nj_data)
                 k_local = get_local_stiffness(E_conc, G_conc, A_sec, Iy_sec, Iz_sec, J_sec, L)
                 el['k_global'] = np.dot(np.dot(T_matrix.T, k_local), T_matrix)
@@ -532,6 +574,9 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                 k_local = get_local_stiffness(E_conc, G_conc, b*h, (b*h**3)/12.0, (h*b**3)/12.0, J_sec, el['length'])
                 u_local = np.dot(T_matrix, np.concatenate((U_global[el['ni']*6:el['ni']*6+6], U_global[el['nj']*6:el['nj']*6+6])))
                 
+                # Store local displacement for deflection checks
+                el['u_local'] = u_local
+                
                 F_local_ENL = np.zeros(12)
                 w = el.get('load_kN_m', 0.0)
                 if el['type'] == 'Beam' and w > 0:
@@ -540,7 +585,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                     
                 el['F_internal'] = np.dot(k_local, u_local) - F_local_ENL
 
-            return current_elements, np.max(np.abs(U_global))
+            return current_elements, U_global
 
         passed_phase1, passed_phase2, passed_phase3 = False, False, False
         max_iters = 12 
@@ -549,8 +594,8 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
         iteration = 1
         while iteration <= max_iters:
             try:
-                elements, max_def = run_analysis_dynamic(elements, nodes, opt_slab_thickness)
-                elements, passed_phase1 = perform_design(elements)
+                elements, U_global_res = run_analysis_dynamic(elements, nodes, opt_slab_thickness)
+                elements, passed_phase1 = perform_design(elements, U_global_res, nodes, z_elevations)
                 
                 if passed_phase1 or not auto_optimize:
                     if passed_phase1: st.success(f"✅ Phase 1: Initial Topology achieved 100% Safe Design in {iteration} iteration(s).")
@@ -564,10 +609,10 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                             
                             if el['type'] == 'Beam':
                                 if 'shear' in mode: b += 50; h += 50
-                                elif 'flexure' in mode: h += 50 
+                                elif 'flexure' in mode or 'deflection' in mode: h += 50 
                                 else: h += 50
                             else: 
-                                if 'axial_crushing' in mode: b += 50; h += 50
+                                if 'axial_crushing' in mode or 'drift' in mode: b += 50; h += 50
                                 elif 'steel_limit' in mode:
                                     h += 50 
                                     if h - b > 200: b += 50 
@@ -602,8 +647,8 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                 
                 ai_iters = 1
                 while ai_iters <= 10: 
-                    ai_elements, max_def = run_analysis_dynamic(ai_elements, ai_nodes, opt_slab_thickness)
-                    ai_elements, passed_phase2 = perform_design(ai_elements)
+                    ai_elements, U_global_res = run_analysis_dynamic(ai_elements, ai_nodes, opt_slab_thickness)
+                    ai_elements, passed_phase2 = perform_design(ai_elements, U_global_res, ai_nodes, z_elevations)
                     if passed_phase2:
                         st.success(f"✅ Phase 2 Successful! Secondary beams stabilized the structure.")
                         nodes, elements = ai_nodes, ai_elements
@@ -620,7 +665,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                                     if 'shear' in mode: b += 50; h += 50
                                     else: h += 50
                                 else:
-                                    if 'axial_crushing' in mode: b += 50; h += 50
+                                    if 'axial_crushing' in mode or 'drift' in mode: b += 50; h += 50
                                     elif 'steel_limit' in mode: h += 50
                                     else: b += 50; h += 50
                                 
@@ -661,8 +706,8 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                 
                 hard_iters = 1
                 while hard_iters <= 10:
-                    hard_elements, max_def = run_analysis_dynamic(hard_elements, hard_nodes, opt_slab_thickness)
-                    hard_elements, passed_phase3 = perform_design(hard_elements)
+                    hard_elements, U_global_res = run_analysis_dynamic(hard_elements, hard_nodes, opt_slab_thickness)
+                    hard_elements, passed_phase3 = perform_design(hard_elements, U_global_res, hard_nodes, z_elevations)
                     if passed_phase3:
                         st.success(f"✅ Phase 3 Deep Restructuring Successful! 100% Safe Design Guaranteed.")
                         break
@@ -677,7 +722,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                                     if 'shear' in mode: b += 50; h += 50
                                     else: h += 50
                                 else:
-                                    if 'axial_crushing' in mode: b += 50; h += 50
+                                    if 'axial_crushing' in mode or 'drift' in mode: b += 50; h += 50
                                     elif 'steel_limit' in mode: h += 50
                                     else: b += 50; h += 50
                                 
@@ -749,7 +794,6 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_contain
                 conc_vol += vol
                 steel_wt += vol * 7850 * (0.015 if el['type'] == 'Column' else 0.012)
             
-            # Using Optimized Slab Thickness for BoQ
             slab_vol = approx_floor_area * (opt_slab_thickness/1000) if z > 0 else 0
             conc_vol += slab_vol
             steel_wt += slab_vol * 7850 * 0.008
