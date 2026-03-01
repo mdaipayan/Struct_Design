@@ -466,20 +466,196 @@ def group_elements(elements_list, elem_type):
         return grouped
 
 # --- EXECUTION BLOCK ---
-if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stretch"):
-    with st.spinner("Analyzing Frame..."):
+if st.button("Run 3-Stage AI Optimization & Design", type="primary", use_container_width=True):
+    with st.spinner("Analyzing Frame & Designing Slabs..."):
         if len(nodes) < 2:
             st.error("Not enough valid nodes generated. Please check your grid definitions.")
             st.stop()
             
+        # --- 0. SMART SLAB DESIGN & OPTIMIZATION (IS 456) ---
+        # Filter out tiny architectural offsets (< 0.5m) to find the TRUE max slab panel
+        x_coords = sorted(list(x_map.values()))
+        y_coords = sorted(list(y_map.values()))
+        
+        x_spans = [x_coords[i+1] - x_coords[i] for i in range(len(x_coords)-1) if (x_coords[i+1] - x_coords[i]) > 0.5]
+        y_spans = [y_coords[i+1] - y_coords[i] for i in range(len(y_coords)-1) if (y_coords[i+1] - y_coords[i]) > 0.5]
+        
+        panel_lx = max(x_spans) if x_spans else 1.0
+        panel_ly = max(y_spans) if y_spans else 1.0
+        
+        Lx = min(panel_lx, panel_ly)
+        Ly = max(panel_lx, panel_ly)
+        ratio = Ly / Lx
+        slab_behavior = "One-Way" if ratio > 2.0 else "Two-Way"
+        
+        # IS 456 Bending Moment Coefficients
+        alphas = [0.062, 0.074, 0.084, 0.093, 0.099, 0.104, 0.113, 0.118]
+        alpha_x = np.interp(ratio, [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0], alphas) if slab_behavior == "Two-Way" else 0.125
+        R_max = 0.133 * fck if fy >= 500 else 0.138 * fck
+        
+        opt_slab_thickness = slab_thickness
+        slab_Ast = 0.0
+        slab_Mu = 0.0
+        slab_status = "Fail"
+        
+        # AI Loop for Slab Sizing
+        for _ in range(15):
+            d_req_def = (Lx * 1000) / 28.0 # IS 456 Deflection limit
+            w_u = 1.5 * (live_load + floor_finish + (opt_slab_thickness / 1000.0) * 25.0)
+            slab_Mu = alpha_x * w_u * (Lx**2)
+            d_req_flex = math.sqrt((slab_Mu * 1e6) / (R_max * 1000))
+            
+            D_req = max(d_req_def, d_req_flex) + 20 + 5 # +Cover + Half Bar
+            
+            if opt_slab_thickness >= D_req:
+                d_prov = opt_slab_thickness - 25
+                sqrt_term = 1 - (4.6 * slab_Mu * 1e6) / (fck * 1000 * d_prov**2)
+                if sqrt_term > 0:
+                    Ast_req = (0.5 * fck / fy) * (1 - math.sqrt(sqrt_term)) * 1000 * d_prov
+                    Ast_min = 0.0012 * 1000 * opt_slab_thickness
+                    slab_Ast = max(Ast_req, Ast_min)
+                    slab_status = "Safe"
+                    break
+            
+            if auto_optimize: opt_slab_thickness += 10
+            else: break
+
+        # Redefine run_analysis to use optimized slab weight
+        def run_analysis_dynamic(current_elements, current_nodes, optimized_slab_D):
+            num_nodes = len(current_nodes)
+            if num_nodes == 0: return current_elements, 0.0
+            
+            F_global = np.zeros(num_nodes * 6)
+            E_conc = 5000 * math.sqrt(fck) * 1e3
+            G_conc = E_conc / 2.4 
+            
+            X_coords, Y_coords = [n['x'] for n in current_nodes], [n['y'] for n in current_nodes]
+            floor_area = (max(X_coords) - min(X_coords)) * (max(Y_coords) - min(Y_coords)) * 0.85 if X_coords else 0
+            
+            # USE NEW OPTIMIZED THICKNESS
+            total_dl_per_m2 = ((optimized_slab_D / 1000.0) * 25.0) + floor_finish
+            total_floor_dl = floor_area * total_dl_per_m2
+            total_floor_ll = floor_area * live_load
+            
+            total_beam_len = sum([math.sqrt((next(n for n in current_nodes if n['id'] == el['nj'])['x']-next(n for n in current_nodes if n['id'] == el['ni'])['x'])**2 + (next(n for n in current_nodes if n['id'] == el['nj'])['y']-next(n for n in current_nodes if n['id'] == el['ni'])['y'])**2) for el in current_elements if el['type'] == 'Beam'])
+            if total_beam_len == 0: total_beam_len = 1.0
+
+            seismic_weight_total = 0.0
+            seismic_mass_per_floor = total_floor_dl + ((0.25 if live_load <= 3.0 else 0.50) * total_floor_ll)
+
+            for el in current_elements:
+                el['load_kN_m'] = 0.0
+                if el['type'] == 'Beam':
+                    ni = next(n for n in current_nodes if n['id'] == el['ni'])
+                    nj = next(n for n in current_nodes if n['id'] == el['nj'])
+                    L = math.sqrt((nj['x']-ni['x'])**2 + (nj['y']-ni['y'])**2)
+                    el['length'] = L
+                    
+                    b, h = map(lambda x: float(x)/1000, el['size'].split('x'))
+                    if el.get('angle', 0) == 90: b, h = h, b 
+                    
+                    is_secondary = not (ni.get('is_primary', True) and nj.get('is_primary', True))
+                    wall_udl = 0.0
+                    if not is_secondary: 
+                        h_story = (z_elevations.get(ni['floor'], 3.0) - z_elevations.get(ni['floor']-1, 0.0)) if ni['floor']>0 else 3.0
+                        wall_udl = (wall_thickness / 1000.0) * 20.0 * max(0.1, (h_story - h))
+
+                    area_dl_udl = total_floor_dl / total_beam_len
+                    area_ll_udl = total_floor_ll / total_beam_len
+                    self_wt = b * h * 25.0
+                    
+                    el['load_kN_m'] = 1.5 * (area_dl_udl + area_ll_udl + wall_udl + self_wt)
+                    seismic_weight_total += (wall_udl + self_wt) * L
+
+            seismic_weight_total += (seismic_mass_per_floor * num_stories)
+            V_base = lateral_coeff * seismic_weight_total
+            
+            floor_weights = {z: seismic_weight_total / num_stories for z in range(1, num_stories + 1)}
+            sum_wh2 = sum([floor_weights[z] * (z_elevations[z]**2) for z in floor_weights])
+            floor_forces = {z: V_base * (floor_weights[z] * (z_elevations[z]**2)) / sum_wh2 if sum_wh2 > 0 else 0 for z in floor_weights}
+
+            for n in current_nodes:
+                if n['z'] > 0:
+                    nodes_this_floor = len([nd for nd in current_nodes if nd['floor'] == n['floor']])
+                    F_global[n['id'] * 6] += (floor_forces[n['floor']] / nodes_this_floor) if nodes_this_floor > 0 else 0
+
+            for el in current_elements:
+                ni_data = next(n for n in current_nodes if n['id'] == el['ni'])
+                nj_data = next(n for n in current_nodes if n['id'] == el['nj'])
+                L = math.sqrt((nj_data['x']-ni_data['x'])**2 + (nj_data['y']-ni_data['y'])**2 + (nj_data['z']-ni_data['z'])**2)
+                el['length'] = L
+                
+                b, h = map(lambda x: float(x)/1000, el['size'].split('x'))
+                if el.get('angle', 0) == 90: b, h = h, b 
+                    
+                A_sec, Iy_sec, Iz_sec = b * h, (b * h**3) / 12.0, (h * b**3) / 12.0
+                dim_min, dim_max = min(b, h), max(b, h)
+                J_sec = (dim_min**3 * dim_max) * (1/3 - 0.21 * (dim_min/dim_max) * (1 - (dim_min**4) / (12 * dim_max**4)))
+
+                T_matrix = get_transformation_matrix(ni_data, nj_data)
+                k_local = get_local_stiffness(E_conc, G_conc, A_sec, Iy_sec, Iz_sec, J_sec, L)
+                el['k_global'] = np.dot(np.dot(T_matrix.T, k_local), T_matrix)
+
+                w = el.get('load_kN_m', 0.0)
+                if el['type'] == 'Beam' and w > 0:
+                    V, M = (w * L) / 2.0, (w * L**2) / 12.0
+                    F_local_ENL = np.zeros(12)
+                    F_local_ENL[1], F_local_ENL[5], F_local_ENL[7], F_local_ENL[11] = V, M, V, -M
+                    P_global = np.dot(T_matrix.T, F_local_ENL)
+                    F_global[el['ni']*6 : el['ni']*6+6] -= P_global[0:6]
+                    F_global[el['nj']*6 : el['nj']*6+6] -= P_global[6:12]
+
+            K_global = np.zeros((num_nodes * 6, num_nodes * 6))
+            for el in current_elements:
+                i_dof, j_dof = el['ni'] * 6, el['nj'] * 6
+                k_g = el['k_global']
+                K_global[i_dof:i_dof+6, i_dof:i_dof+6] += k_g[0:6, 0:6]
+                K_global[i_dof:i_dof+6, j_dof:j_dof+6] += k_g[0:6, 6:12]
+                K_global[j_dof:j_dof+6, i_dof:i_dof+6] += k_g[6:12, 0:6]
+                K_global[j_dof:j_dof+6, j_dof:j_dof+6] += k_g[6:12, 6:12]
+
+            fixed_dofs = [dof for n in current_nodes if n['z'] == 0 for dof in range(n['id'] * 6, n['id'] * 6 + 6)]
+            free_dofs = sorted(list(set(range(num_nodes * 6)) - set(fixed_dofs)))
+            
+            try:
+                U_free = np.linalg.solve(K_global[np.ix_(free_dofs, free_dofs)], F_global[free_dofs])
+            except np.linalg.LinAlgError:
+                raise Exception("Matrix is singular. Frame geometry is unstable.")
+                
+            U_global = np.zeros(num_nodes * 6)
+            U_global[free_dofs] = U_free
+            
+            for el in current_elements:
+                ni_data = next(n for n in current_nodes if n['id'] == el['ni'])
+                nj_data = next(n for n in current_nodes if n['id'] == el['nj'])
+                T_matrix = get_transformation_matrix(ni_data, nj_data)
+                
+                b, h = map(lambda x: float(x)/1000, el['size'].split('x'))
+                if el.get('angle', 0) == 90: b, h = h, b 
+                    
+                dim_min, dim_max = min(b, h), max(b, h)
+                J_sec = (dim_min**3 * dim_max) * (1/3 - 0.21 * (dim_min/dim_max) * (1 - (dim_min**4) / (12 * dim_max**4)))
+                k_local = get_local_stiffness(E_conc, G_conc, b*h, (b*h**3)/12.0, (h*b**3)/12.0, J_sec, el['length'])
+                u_local = np.dot(T_matrix, np.concatenate((U_global[el['ni']*6:el['ni']*6+6], U_global[el['nj']*6:el['nj']*6+6])))
+                
+                F_local_ENL = np.zeros(12)
+                w = el.get('load_kN_m', 0.0)
+                if el['type'] == 'Beam' and w > 0:
+                    V, M = (w * el['length']) / 2.0, (w * el['length']**2) / 12.0
+                    F_local_ENL[1], F_local_ENL[5], F_local_ENL[7], F_local_ENL[11] = V, M, V, -M
+                    
+                el['F_internal'] = np.dot(k_local, u_local) - F_local_ENL
+
+            return current_elements, np.max(np.abs(U_global))
+
         passed_phase1, passed_phase2, passed_phase3 = False, False, False
-        max_iters = 12 # Increased iterations for deep check heuristics
+        max_iters = 12 
         
         # --- PHASE 1: SMART SIZING (HEURISTIC DIAGNOSTICS) ---
         iteration = 1
         while iteration <= max_iters:
             try:
-                elements, max_def = run_analysis(elements, nodes)
+                elements, max_def = run_analysis_dynamic(elements, nodes, opt_slab_thickness)
                 elements, passed_phase1 = perform_design(elements)
                 
                 if passed_phase1 or not auto_optimize:
@@ -492,27 +668,18 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stre
                             b, h = int(b_str), int(h_str)
                             mode = el.get('failure_mode', '')
                             
-                            # Smart Heuristic Check
                             if el['type'] == 'Beam':
-                                if 'shear' in mode:
-                                    b += 50
-                                    h += 50
-                                elif 'flexure' in mode:
-                                    h += 50 # Depth is highly effective for flexure
-                                else:
-                                    h += 50
-                            else: # Column
-                                if 'axial_crushing' in mode:
-                                    b += 50; h += 50
+                                if 'shear' in mode: b += 50; h += 50
+                                elif 'flexure' in mode: h += 50 
+                                else: h += 50
+                            else: 
+                                if 'axial_crushing' in mode: b += 50; h += 50
                                 elif 'steel_limit' in mode:
-                                    h += 50 # Increase depth to absorb moments
-                                    if h - b > 200: b += 50 # maintain safe aspect ratio
-                                else:
-                                    b += 50; h += 50
+                                    h += 50 
+                                    if h - b > 200: b += 50 
+                                else: b += 50; h += 50
                             
-                            # Hard limits to prevent infinite architectural bloat
-                            b = min(b, 1000)
-                            h = min(h, 1200)
+                            b, h = min(b, 1000), min(h, 1200)
                             el['size'] = f"{b}x{h}"
                     iteration += 1
             except Exception as e:
@@ -541,7 +708,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stre
                 
                 ai_iters = 1
                 while ai_iters <= 10: 
-                    ai_elements, max_def = run_analysis(ai_elements, ai_nodes)
+                    ai_elements, max_def = run_analysis_dynamic(ai_elements, ai_nodes, opt_slab_thickness)
                     ai_elements, passed_phase2 = perform_design(ai_elements)
                     if passed_phase2:
                         st.success(f"✅ Phase 2 Successful! Secondary beams stabilized the structure.")
@@ -600,7 +767,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stre
                 
                 hard_iters = 1
                 while hard_iters <= 10:
-                    hard_elements, max_def = run_analysis(hard_elements, hard_nodes)
+                    hard_elements, max_def = run_analysis_dynamic(hard_elements, hard_nodes, opt_slab_thickness)
                     hard_elements, passed_phase3 = perform_design(hard_elements)
                     if passed_phase3:
                         st.success(f"✅ Phase 3 Deep Restructuring Successful! 100% Safe Design Guaranteed.")
@@ -629,22 +796,18 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stre
             else:
                 st.info("🧠 AI could not safely inject columns without severe crowding. Manual layout review required.")
 
-        # --- EXTRACT SPAN DATA FOR SLABS ---
-        max_span_x, max_span_y = 0.1, 0.1
-        for el in elements:
-            if el['type'] == 'Beam':
-                span_x = abs(next(n for n in nodes if n['id'] == el['nj'])['x'] - next(n for n in nodes if n['id'] == el['ni'])['x'])
-                span_y = abs(next(n for n in nodes if n['id'] == el['nj'])['y'] - next(n for n in nodes if n['id'] == el['ni'])['y'])
-                if span_x > max_span_x: max_span_x = span_x
-                if span_y > max_span_y: max_span_y = span_y
-
+        # --- EXPORT SLAB DESIGN DATA ---
         slabs = []
         for z in range(1, num_stories + 1):
             slabs.append({
-                'Floor': z, 'Max Grid Dim (m)': f"{round(max_span_x,2)} x {round(max_span_y,2)}",
-                'Behavior': "One-Way" if (max_span_y/max_span_x if max_span_x>0 else 1)>2.0 else "Two-Way", 
-                'Thickness (mm)': slab_thickness,
-                'Status': 'Safe'
+                'Floor': z, 
+                'Max Panel (m)': f"{round(Lx,2)} x {round(Ly,2)}",
+                'Behavior': slab_behavior, 
+                'Init Depth (mm)': slab_thickness,
+                'Opt. Depth (mm)': opt_slab_thickness,
+                'Max Mu (kN.m)': round(slab_Mu, 2),
+                'Ast req (mm²/m)': round(slab_Ast, 1),
+                'Status': slab_status
             })
                     
         # --- FOOTINGS ---
@@ -692,7 +855,8 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stre
                 conc_vol += vol
                 steel_wt += vol * 7850 * (0.015 if el['type'] == 'Column' else 0.012)
             
-            slab_vol = approx_floor_area * (slab_thickness/1000) if z > 0 else 0
+            # Using Optimized Slab Thickness for BoQ
+            slab_vol = approx_floor_area * (opt_slab_thickness/1000) if z > 0 else 0
             conc_vol += slab_vol
             steel_wt += slab_vol * 7850 * 0.008
             total_conc += conc_vol
@@ -701,7 +865,7 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stre
                 materials.append({"Floor": f"Level {z}", "Concrete (m³)": round(conc_vol, 2), "Steel (kg)": round(steel_wt, 2)})
                 
         colA, colB = st.columns(2)
-        colA.dataframe(pd.DataFrame(materials), width="stretch")
+        colA.dataframe(pd.DataFrame(materials), use_container_width=True)
         colB.metric("Total Concrete Volume", f"{total_conc:.2f} m³")
         colB.metric("Total Rebar Weight", f"{total_steel / 1000:.2f} MT")
 
@@ -710,20 +874,19 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stre
         
         col_grp1, col_grp2 = st.columns(2)
         col_grp1.subheader("Beam Groups")
-        col_grp1.dataframe(group_elements(elements, 'Beam'), width="stretch")
+        col_grp1.dataframe(group_elements(elements, 'Beam'), use_container_width=True)
         col_grp2.subheader("Column Groups")
-        col_grp2.dataframe(group_elements(elements, 'Column'), width="stretch")
+        col_grp2.dataframe(group_elements(elements, 'Column'), use_container_width=True)
 
         tab1, tab2, tab3, tab4 = st.tabs(["Slabs", "Beams", "Columns", "Footings"])
-        tab1.dataframe(pd.DataFrame(slabs), width="stretch")
+        tab1.dataframe(pd.DataFrame(slabs), use_container_width=True)
         
-        # Format failure modes elegantly in the detailed view
         beam_df = pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Beam'])
-        tab2.dataframe(beam_df, width="stretch")
+        tab2.dataframe(beam_df, use_container_width=True)
         
         col_df = pd.DataFrame([el['design_details'] for el in elements if el['type'] == 'Column'])
-        tab3.dataframe(col_df, width="stretch")
-        tab4.dataframe(pd.DataFrame(footings), width="stretch")
+        tab3.dataframe(col_df, use_container_width=True)
+        tab4.dataframe(pd.DataFrame(footings), use_container_width=True)
 
         # --- 7. FOUNDATION ECONOMICS ---
         st.divider()
@@ -763,4 +926,4 @@ if st.button("Run 3-Stage AI Optimization & Design", type="primary", width="stre
             st.info("💡 Recommendation: Standard Pad/Combined footings are more economical.")
             
         with st.expander("View Dynamic Pile Lengths per Column"): 
-            st.dataframe(pd.DataFrame(pile_details), width="stretch")
+            st.dataframe(pd.DataFrame(pile_details), use_container_width=True)
