@@ -35,12 +35,21 @@ x_map = {str(row['Grid_ID']).strip(): float(row['X_Coord (m)']) for _, row in x_
 y_map = {str(row['Grid_ID']).strip(): float(row['Y_Coord (m)']) for _, row in y_grid_data.iterrows() if pd.notna(row['Grid_ID'])}
 
 with st.sidebar.expander("Column Locations & Orientations", expanded=True):
+    # --- ADDED INSTRUCTIONS HERE ---
+    st.info(
+        "📝 **How to place columns:**\n"
+        "* **X_Grid & Y_Grid:** Type the exact Grid ID (e.g., A, 1) defined in Step 2.\n"
+        "* **Offsets:** Shift the column from the exact grid intersection (in meters).\n"
+        "* **Angle:** `0` aligns the column's depth (D) along the X-axis. `90` rotates it to the Y-axis.\n"
+        "* **Add/Delete:** Click the empty bottom row to add a new column. Click the far-left gray box of a row and press `Delete` to remove it."
+    )
+    
     default_cols = pd.DataFrame({
         "Col_ID": ["C1", "C2", "C3", "C4", "C5"],
         "X_Grid": ["A", "B", "C", "D", "E"], "Y_Grid": ["1", "2", "3", "4", "5"],
         "X_Offset (m)": [0.0]*5, "Y_Offset (m)": [0.0]*5, "Angle (deg)": [0, 90, 90, 0, 90]
     })
-    col_data = st.data_editor(default_cols, num_rows="dynamic", use_container_width=True)
+    col_data = st.data_editor(default_cols, num_rows="dynamic", width="stretch")
 
 st.sidebar.header("4. IS Code Design & Load Parameters")
 col_dim = st.sidebar.text_input("Init Column Size (mm)", "230x450")
